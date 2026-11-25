@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import argon2 from 'argon2';
 import type { AppConfig } from '@/config/env.js';
 import { AuthenticationError } from '@/common/errors/app-error.js';
+import { hashPassword, verifyPassword } from '@/common/security/password.js';
 import type { AuthRepository } from '@/modules/auth/auth.repository.js';
 import type { LoginInput } from '@/modules/auth/auth.validation.js';
 import type { PublicUser, SessionContext, TokenPair } from '@/modules/auth/auth.types.js';
@@ -15,18 +15,18 @@ export class AuthService {
     private readonly tokens: TokenService,
     private readonly config: AppConfig,
   ) {
-    this.dummyHash = argon2.hash(randomUUID(), { type: argon2.argon2id });
+    this.dummyHash = hashPassword(randomUUID());
   }
 
   public async login(input: LoginInput, context: SessionContext): Promise<TokenPair> {
     const user = await this.repository.findUserByEmail(input.email);
     const hash = user?.passwordHash ?? (await this.dummyHash);
-    const validPassword = await argon2.verify(hash, input.password).catch(() => false);
+    const validPassword = await verifyPassword(hash, input.password);
     if (!user || !user.isActive || !validPassword)
       throw new AuthenticationError('Invalid email or password');
 
     const publicUser: PublicUser = { id: user.id, email: user.email, role: user.role };
-    return this.issueNewSession(publicUser, context);
+    return this.issueNewSession(publicUser, context, user.passwordHash);
   }
 
   public async refresh(refreshToken: string, context: SessionContext): Promise<TokenPair> {
@@ -50,15 +50,23 @@ export class AuthService {
       await this.repository.revokeSession(this.tokens.hashRefreshToken(refreshToken));
   }
 
-  private async issueNewSession(user: PublicUser, context: SessionContext): Promise<TokenPair> {
+  private async issueNewSession(
+    user: PublicUser,
+    context: SessionContext,
+    verifiedPasswordHash: string,
+  ): Promise<TokenPair> {
     const refreshToken = this.tokens.createRefreshToken();
-    await this.repository.createSession({
-      tokenHash: this.tokens.hashRefreshToken(refreshToken),
-      userId: user.id,
-      familyId: randomUUID(),
-      expiresAt: this.refreshExpiry(),
-      ...context,
-    });
+    const created = await this.repository.createSession(
+      {
+        tokenHash: this.tokens.hashRefreshToken(refreshToken),
+        userId: user.id,
+        familyId: randomUUID(),
+        expiresAt: this.refreshExpiry(),
+        ...context,
+      },
+      verifiedPasswordHash,
+    );
+    if (!created) throw new AuthenticationError('Invalid email or password');
     return {
       accessToken: await this.tokens.signAccessToken(user),
       refreshToken,

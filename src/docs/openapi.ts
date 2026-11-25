@@ -33,12 +33,31 @@ const outletIdParameter: OpenAPIV3.ParameterObject = {
   schema: { type: 'string', format: 'uuid' },
 };
 
+const staffEnvelope = responseEnvelope({
+  type: 'object',
+  required: ['staff'],
+  properties: { staff: { $ref: '#/components/schemas/StaffDetail' } },
+});
+
+const staffIdParameter: OpenAPIV3.ParameterObject = {
+  in: 'path',
+  name: 'staffId',
+  required: true,
+  schema: { type: 'string', format: 'uuid' },
+};
+
+const hqAdminErrors: Record<string, OpenAPIV3.ResponseObject> = {
+  '400': errorResponse('Invalid request', 'ValidationError'),
+  '401': errorResponse('Authentication required'),
+  '403': errorResponse('HQ_ADMIN role required'),
+};
+
 export const openApiDocument: OpenAPIV3.Document = {
   openapi: '3.0.3',
   info: {
     title: 'OutletHub API',
     version: '1.0.0',
-    description: 'OutletHub authentication, health, and outlet management API.',
+    description: 'OutletHub authentication, health, outlet management, and staff management API.',
   },
   servers: [{ url: '/api/v1' }],
   components: {
@@ -94,6 +113,53 @@ export const openApiDocument: OpenAPIV3.Document = {
           total: { type: 'integer', minimum: 0 },
           totalPages: { type: 'integer', minimum: 0 },
         },
+      },
+      StaffIdentity: {
+        type: 'object',
+        required: ['id', 'email', 'role', 'isActive', 'createdAt', 'updatedAt'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          email: { type: 'string', format: 'email', maxLength: 320 },
+          role: { type: 'string', enum: ['OUTLET_STAFF'] },
+          isActive: { type: 'boolean' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      StaffSummary: {
+        allOf: [
+          { $ref: '#/components/schemas/StaffIdentity' },
+          {
+            type: 'object',
+            required: ['outletCount'],
+            properties: { outletCount: { type: 'integer', minimum: 0 } },
+          },
+        ],
+      },
+      StaffDetail: {
+        allOf: [
+          { $ref: '#/components/schemas/StaffIdentity' },
+          {
+            type: 'object',
+            required: ['outlets'],
+            properties: {
+              outlets: {
+                type: 'array',
+                description: 'Assigned outlets ordered by code, including inactive ones',
+                items: {
+                  type: 'object',
+                  required: ['id', 'code', 'name', 'isActive'],
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    code: { type: 'string' },
+                    name: { type: 'string' },
+                    isActive: { type: 'boolean' },
+                  },
+                },
+              },
+            },
+          },
+        ],
       },
       User: {
         type: 'object',
@@ -325,6 +391,251 @@ export const openApiDocument: OpenAPIV3.Document = {
           '401': errorResponse('Authentication required'),
           '403': errorResponse('HQ_ADMIN role required'),
           '404': errorResponse('Outlet not found'),
+        },
+      },
+    },
+    '/staff': {
+      get: {
+        tags: ['Staff'],
+        summary: 'List outlet staff (HQ_ADMIN)',
+        description: 'Returns OUTLET_STAFF accounts only; HQ administrators are never listed.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { in: 'query', name: 'page', schema: { type: 'integer', minimum: 1, default: 1 } },
+          {
+            in: 'query',
+            name: 'limit',
+            schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+          },
+          {
+            in: 'query',
+            name: 'search',
+            description: 'Case-insensitive email match',
+            schema: { type: 'string', maxLength: 100 },
+          },
+          {
+            in: 'query',
+            name: 'status',
+            schema: { type: 'string', enum: ['all', 'active', 'inactive'], default: 'all' },
+          },
+          {
+            in: 'query',
+            name: 'outletId',
+            description: 'Only staff assigned to this outlet',
+            schema: { type: 'string', format: 'uuid' },
+          },
+          {
+            in: 'query',
+            name: 'sortBy',
+            schema: {
+              type: 'string',
+              enum: ['email', 'createdAt', 'updatedAt'],
+              default: 'createdAt',
+            },
+          },
+          {
+            in: 'query',
+            name: 'sortOrder',
+            schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
+          },
+        ],
+        responses: {
+          '200': {
+            description: 'Staff page',
+            content: {
+              'application/json': responseEnvelope({
+                type: 'object',
+                required: ['items', 'pagination'],
+                properties: {
+                  items: { type: 'array', items: { $ref: '#/components/schemas/StaffSummary' } },
+                  pagination: { $ref: '#/components/schemas/Pagination' },
+                },
+              }),
+            },
+          },
+          ...hqAdminErrors,
+        },
+      },
+      post: {
+        tags: ['Staff'],
+        summary: 'Create an outlet staff account (HQ_ADMIN)',
+        description:
+          'Role is always OUTLET_STAFF and the account starts active. The user and all memberships are created in one transaction; every outlet must exist and be active.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['email', 'password'],
+                properties: {
+                  email: { type: 'string', format: 'email', maxLength: 320 },
+                  password: {
+                    type: 'string',
+                    format: 'password',
+                    writeOnly: true,
+                    minLength: 12,
+                    maxLength: 128,
+                  },
+                  outletIds: {
+                    type: 'array',
+                    uniqueItems: true,
+                    maxItems: 200,
+                    default: [],
+                    items: { type: 'string', format: 'uuid' },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': { description: 'Created', content: { 'application/json': staffEnvelope } },
+          '409': errorResponse('Email already in use', 'ValidationError'),
+          ...hqAdminErrors,
+        },
+      },
+    },
+    '/staff/{staffId}': {
+      parameters: [staffIdParameter],
+      get: {
+        tags: ['Staff'],
+        summary: 'Get a staff member with assigned outlets (HQ_ADMIN)',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': { description: 'Staff member', content: { 'application/json': staffEnvelope } },
+          '404': errorResponse('Not found or not an OUTLET_STAFF account'),
+          ...hqAdminErrors,
+        },
+      },
+      patch: {
+        tags: ['Staff'],
+        summary: 'Change a staff email (HQ_ADMIN)',
+        description: 'The new email becomes the login identifier immediately. Sessions are kept.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['email'],
+                properties: { email: { type: 'string', format: 'email', maxLength: 320 } },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Updated', content: { 'application/json': staffEnvelope } },
+          '404': errorResponse('Not found or not an OUTLET_STAFF account'),
+          '409': errorResponse('Email already in use', 'ValidationError'),
+          ...hqAdminErrors,
+        },
+      },
+    },
+    '/staff/{staffId}/status': {
+      parameters: [staffIdParameter],
+      patch: {
+        tags: ['Staff'],
+        summary: 'Activate or deactivate a staff account (HQ_ADMIN)',
+        description:
+          'Idempotent. Deactivation revokes every unrevoked refresh session (ADMIN_REVOKED) in the same transaction; access tokens are rejected on their next use because authentication re-checks is_active. Reactivation does not restore revoked sessions. Memberships and sales are preserved.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['isActive'],
+                properties: { isActive: { type: 'boolean' } },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Status set', content: { 'application/json': staffEnvelope } },
+          '404': errorResponse('Not found or not an OUTLET_STAFF account'),
+          ...hqAdminErrors,
+        },
+      },
+    },
+    '/staff/{staffId}/outlets': {
+      parameters: [staffIdParameter],
+      put: {
+        tags: ['Staff'],
+        summary: 'Replace outlet assignments (HQ_ADMIN)',
+        description:
+          'Idempotent replacement of the full membership set. Unchanged memberships are kept, removed ones deleted, added ones created; added outlets must exist and be active. Retained memberships to inactive outlets are allowed. Concurrent requests are serialized per staff member; the last one wins.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['outletIds'],
+                properties: {
+                  outletIds: {
+                    type: 'array',
+                    uniqueItems: true,
+                    maxItems: 200,
+                    items: { type: 'string', format: 'uuid' },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Assignments', content: { 'application/json': staffEnvelope } },
+          '404': errorResponse('Not found or not an OUTLET_STAFF account'),
+          ...hqAdminErrors,
+        },
+      },
+    },
+    '/staff/{staffId}/password': {
+      parameters: [staffIdParameter],
+      patch: {
+        tags: ['Staff'],
+        summary: 'Reset a staff password (HQ_ADMIN)',
+        description:
+          'Rate limited per administrator. Updates the Argon2id hash and revokes every unrevoked refresh session (ADMIN_REVOKED) in one transaction. Access tokens already issued stay valid until they expire (JWT_ACCESS_TTL_SECONDS, 15 minutes by default).',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['newPassword'],
+                properties: {
+                  newPassword: {
+                    type: 'string',
+                    format: 'password',
+                    writeOnly: true,
+                    minLength: 12,
+                    maxLength: 128,
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Password reset',
+            content: { 'application/json': responseEnvelope({ type: 'object' }) },
+          },
+          '404': errorResponse('Not found or not an OUTLET_STAFF account'),
+          '429': errorResponse('Too many password resets'),
+          ...hqAdminErrors,
         },
       },
     },

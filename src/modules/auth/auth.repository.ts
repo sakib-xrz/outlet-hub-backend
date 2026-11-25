@@ -1,4 +1,5 @@
 import type { DatabaseClient } from '@/database/client.js';
+import { lockUser } from '@/database/locks.js';
 import { Prisma, SessionRevokeReason } from '@/generated/prisma/client.js';
 import type { Role } from '@/generated/prisma/enums.js';
 
@@ -50,8 +51,13 @@ export class AuthRepository {
     });
   }
 
-  public async createSession(input: CreateSessionInput): Promise<void> {
-    await this.database.refreshSession.create({ data: input });
+  public createSession(input: CreateSessionInput, verifiedPasswordHash: string): Promise<boolean> {
+    return this.database.$transaction(async (transaction) => {
+      const user = await lockUser(transaction, input.userId, 'share');
+      if (!user?.isActive || user.passwordHash !== verifiedPasswordHash) return false;
+      await transaction.refreshSession.create({ data: input });
+      return true;
+    });
   }
 
   public async rotateSession(
@@ -67,6 +73,8 @@ export class AuthRepository {
               include: { user: { select: userSelect } },
             });
             if (!current) return { kind: 'invalid' } as const;
+            const owner = await lockUser(transaction, current.userId, 'share');
+            if (!owner) return { kind: 'invalid' } as const;
 
             const now = new Date();
             if (current.revokedAt) {
@@ -79,7 +87,7 @@ export class AuthRepository {
               }
               return { kind: 'invalid' } as const;
             }
-            if (current.expiresAt <= now || !current.user.isActive) {
+            if (current.expiresAt <= now || !owner.isActive) {
               await transaction.refreshSession.updateMany({
                 where: { id: current.id, revokedAt: null },
                 data: { revokedAt: now, revokeReason: SessionRevokeReason.EXPIRED },

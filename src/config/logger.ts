@@ -6,6 +6,8 @@ const redactPaths = [
   'req.headers.cookie',
   'res.headers["set-cookie"]',
   '*.password',
+  '*.newPassword',
+  'req.body',
   '*.passwordHash',
   '*.accessToken',
   '*.refreshToken',

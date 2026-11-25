@@ -1,10 +1,8 @@
 import { AuthorizationError, NotFoundError } from '@/common/errors/app-error.js';
 import type { AuthenticatedUser } from '@/common/types/http.js';
 import { Role } from '@/generated/prisma/enums.js';
-import type {
-  DatabaseExecutor,
-  OutletAccessRepository,
-} from '@/modules/access/outlet-access.repository.js';
+import type { DatabaseExecutor } from '@/database/client.js';
+import type { OutletAccessRepository } from '@/modules/access/outlet-access.repository.js';
 
 export type OutletAccessStore = Pick<
   OutletAccessRepository,

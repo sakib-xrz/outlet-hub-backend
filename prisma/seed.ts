@@ -1,6 +1,6 @@
 import '@/config/load-env.js';
-import argon2 from 'argon2';
 import { z } from 'zod';
+import { hashPassword } from '@/common/security/password.js';
 import { loadConfig } from '@/config/env.js';
 import { createPrismaClient } from '@/database/client.js';
 import { Role } from '@/generated/prisma/enums.js';
@@ -16,7 +16,7 @@ const config = loadConfig();
 const database = createPrismaClient(config);
 
 try {
-  const passwordHash = await argon2.hash(credentials.ADMIN_PASSWORD, { type: argon2.argon2id });
+  const passwordHash = await hashPassword(credentials.ADMIN_PASSWORD);
   const user = await database.user.upsert({
     where: { email: credentials.ADMIN_EMAIL },
     create: { email: credentials.ADMIN_EMAIL, passwordHash, role: Role.HQ_ADMIN },

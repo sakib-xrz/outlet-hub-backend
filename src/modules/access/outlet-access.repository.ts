@@ -1,7 +1,4 @@
-import type { DatabaseClient } from '@/database/client.js';
-import type { Prisma } from '@/generated/prisma/client.js';
-
-export type DatabaseExecutor = DatabaseClient | Prisma.TransactionClient;
+import type { DatabaseClient, DatabaseExecutor } from '@/database/client.js';
 
 export class OutletAccessRepository {
   public constructor(private readonly database: DatabaseClient) {}

@@ -13,6 +13,10 @@ import { OutletController } from '@/modules/outlets/outlet.controller.js';
 import { OutletRepository } from '@/modules/outlets/outlet.repository.js';
 import { createOutletRouter } from '@/modules/outlets/outlet.route.js';
 import { OutletService } from '@/modules/outlets/outlet.service.js';
+import { StaffController } from '@/modules/staff/staff.controller.js';
+import { StaffRepository } from '@/modules/staff/staff.repository.js';
+import { createStaffRouter } from '@/modules/staff/staff.route.js';
+import { StaffService } from '@/modules/staff/staff.service.js';
 import { HealthController } from '@/modules/health/health.controller.js';
 import { createHealthRouter } from '@/modules/health/health.route.js';
 
@@ -31,6 +35,8 @@ export function createApiRouter(database: DatabaseClient, config: AppConfig): Ro
   const outletController = new OutletController(new OutletService(new OutletRepository(database)));
 
   router.use('/outlets', createOutletRouter(outletController, requireAuth, outletAccess));
+  const staffController = new StaffController(new StaffService(new StaffRepository(database)));
+  router.use('/staff', createStaffRouter(staffController, requireAuth, config));
   router.use('/health', createHealthRouter(new HealthController(database, config)));
   return router;
 }

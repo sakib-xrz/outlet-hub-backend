@@ -1,6 +1,6 @@
 # OutletHub Backend
 
-Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, and **Outlet Management** (phase 1). Staff, menu, inventory, sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
+Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, **Outlet Management** (phase 1) and **Staff & Outlet Membership Management** (phase 2). Menu, inventory, sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
 
 ## Stack
 
@@ -29,7 +29,8 @@ src/
 │   ├── access/             # outlet-access checks (membership, HQ scope)
 │   ├── auth/               # routes → controller → service → repository
 │   ├── health/             # liveness and readiness
-│   └── outlets/            # outlet management
+│   ├── outlets/            # outlet management
+│   └── staff/              # staff accounts and outlet memberships
 ├── routes/                 # versioned route composition
 ├── app.ts                  # side-effect-free Express factory
 └── server.ts               # process and server lifecycle
@@ -313,6 +314,99 @@ All endpoints are under `/api/v1/outlets`, require `Authorization: Bearer <token
 5. Sign in as a staff user who has a membership row for the outlet. `GET /outlets/<id>` returns 403 while the outlet is inactive and 200 after reactivation. `GET /outlets` shows the outlet only while it is active.
 6. `PATCH /outlets/<id> {"code":"X-1"}` returns 400, and the code is unchanged.
 7. Optional rollback check, only on a throwaway database: drop the counter table's write permission for the API role (`REVOKE INSERT ON receipt_counters FROM <role>`). `POST /outlets` should then return 500 with no new row in `outlets`. Restore the permission afterwards.
+
+## Staff API
+
+All endpoints are under `/api/v1/staff`. Every endpoint requires a bearer token and the `HQ_ADMIN` role. They only ever read or change `OUTLET_STAFF` accounts: an HQ administrator's id returns 404, exactly like a missing account.
+
+| Method  | Path                       | Body                              | Result                                    |
+| ------- | -------------------------- | --------------------------------- | ----------------------------------------- |
+| `GET`   | `/staff`                   | –                                 | `{ items, pagination }`                   |
+| `GET`   | `/staff/:staffId`          | –                                 | `{ staff }` with assigned outlets         |
+| `POST`  | `/staff`                   | `{ email, password, outletIds? }` | `201 { staff }`; `409` on duplicate email |
+| `PATCH` | `/staff/:staffId`          | `{ email }`                       | `{ staff }`                               |
+| `PATCH` | `/staff/:staffId/status`   | `{ isActive }`                    | `{ staff }`                               |
+| `PUT`   | `/staff/:staffId/outlets`  | `{ outletIds }` (complete set)    | `{ staff }`                               |
+| `PATCH` | `/staff/:staffId/password` | `{ newPassword }`                 | `{}`; rate limited per administrator      |
+
+**Responses:**
+
+- Staff identity is `id`, `email`, `role` (always `OUTLET_STAFF`), `isActive`, `createdAt` and `updatedAt`.
+- List items add `outletCount`, which comes from a Prisma `_count` in the same query, so there is no N+1.
+- Details add `outlets: [{ id, code, name, isActive }]`, ordered by code and including inactive outlets.
+- Password hashes, sessions and passwords are never returned.
+
+**Listing:**
+
+- Same `page`/`limit` contract as outlets (default 20, max 100).
+- `search` is a case-insensitive email match, up to 100 characters.
+- `status` is `all`, `active` or `inactive`.
+- `outletId` (a UUID) returns only staff assigned to that outlet.
+- `sortBy` is `email`, `createdAt` or `updatedAt`; `sortOrder` is `asc` or `desc`; `id` is the tie-breaker.
+- All filters, and the count, are applied in the database query.
+
+**Validation:**
+
+- **Email:** trimmed and lowercased, at most 320 characters. Uniqueness is enforced by the database's unique index (P2002 → 409 on `body.email`).
+- **Password:** 12–128 characters, not mostly whitespace, and not equal to the email. There are no composition rules, so passphrases and password-manager values work. This stays inside the login schema's 8–1024 range.
+- **`outletIds`:** UUIDs, unique, at most 200.
+- **Bodies are strict.** `role`, `isActive` (outside `/status`), `passwordHash`, ids and timestamps are rejected, not ignored, so a client can't escalate a role.
+
+### Account and membership lifecycle
+
+- **Create:**
+  - The password is hashed with Argon2id (`common/security/password.ts`, shared with login and the admin seed) **before** the transaction opens.
+  - The transaction locks the requested outlets `FOR SHARE` in id order and checks that they exist and are active.
+  - It then inserts the user (`role = OUTLET_STAFF`, `isActive = true`, both set by the server) and all memberships.
+  - Any failure rolls the whole thing back. A staff member may start with zero outlets.
+- **Email change:** the new address becomes the login identifier immediately. Existing sessions are kept.
+- **Deactivate:**
+  - One transaction locks the user row `FOR UPDATE`, sets `is_active = false`, and revokes every unrevoked refresh session (`revoked_at = now()`, `revoke_reason = ADMIN_REVOKED`).
+  - Memberships and sales are untouched.
+  - Access tokens already issued are rejected on their next request, because `authenticate` re-checks `is_active` against the database.
+- **Reactivate:** sets `is_active = true` only. Revoked sessions stay revoked, so the user must sign in again.
+  - Any access token issued before deactivation that has not yet expired (at most `JWT_ACCESS_TTL_SECONDS`, 15 minutes) would work again. There is no access-token denylist.
+  - Repeating the current status is a no-op.
+- **Membership replacement (`PUT /outlets`):**
+  - Idempotent: it sends the complete intended set.
+  - One transaction locks the staff row `FOR UPDATE` (which serializes concurrent replacements for the same staff member), reads the current set, and computes additions and removals.
+  - It then locks **only the added** outlets `FOR SHARE` in id order and requires them to exist and be active.
+  - Removed rows are deleted, added rows inserted, and unchanged rows left alone.
+  - A retained membership to an inactive outlet is allowed. It grants nothing, because access checks require `outlet.is_active`.
+  - There is no optimistic concurrency token, so two administrators editing the same staff member get **last write wins**. Each request is applied atomically against the state it reads under the lock.
+  - Sales are never touched.
+- **Password reset:**
+  - The new hash is computed before the transaction.
+  - The transaction locks the user `FOR UPDATE`, replaces `password_hash`, and revokes every unrevoked refresh session (`ADMIN_REVOKED`).
+  - The response is a generic `{}`. Nothing logs in as the staff member, and no temporary password is generated or emailed.
+  - **Access tokens already issued stay valid until they expire (up to 15 minutes).** The account is still active, so `authenticate` accepts them. This is the documented limit of stateless JWTs in this design.
+- **Hard deletion:** none. Historical sales keep their `created_by_id`.
+
+### Concurrency between account changes and authentication
+
+Login and refresh now take the same user-row lock that account changes take, so a stale credential cannot create a session after a reset or deactivation.
+
+- **Login:**
+  - Argon2 verification still runs outside any transaction.
+  - The session insert then runs in a transaction that `SELECT … FOR SHARE`s the user and re-checks that the account is active and `password_hash` still equals the verified hash. If not, the login fails with the generic 401.
+  - If a reset commits first, the re-check sees the new hash. If the login commits first, the reset waits for it and then revokes the new session.
+- **Refresh rotation** (Serializable) also locks the user row `FOR SHARE` before rotating.
+  - If a reset or deactivation committed concurrently, PostgreSQL raises a serialization failure, the existing single retry runs, and the retry sees the revoked session.
+  - Deactivated users are rejected using the locked row's `is_active`.
+- **Lock order is always user row, then sessions or memberships, then outlets in id order.** This prevents deadlocks between these paths.
+- **Isolation levels:** Read Committed (PostgreSQL's default) for staff transactions and login, Serializable for rotation.
+- **Testing:** the mocked tests check the orchestration (lock order, re-checks, rollback propagation). They do **not** prove PostgreSQL atomicity or lock behavior; the manual check below covers that.
+- **Logs:** request bodies are never logged by `pino-http`, and the redaction list additionally covers `req.body`, `*.password` and `*.newPassword`.
+
+### Manual database check (run only with approval; it writes to the shared database)
+
+1. As an HQ admin, `POST /staff` with an active outlet's id. Confirm the 201 response contains no password fields, and that `SELECT password_hash FROM users WHERE email = …` starts with `$argon2id$`.
+2. Repeat with the same email → 409. Repeat with an inactive outlet → 400, and no user row is created.
+3. Sign in as the staff member, then `PATCH /staff/:id/status {"isActive":false}`. Check `refresh_sessions` shows `revoke_reason = ADMIN_REVOKED`. The staff member's next API call returns 401, and refresh returns 401.
+4. Reactivate. The old refresh cookie is still rejected, and a fresh login works.
+5. `PATCH /staff/:id/password`, then confirm the old password fails, the new one works, and all sessions created before the reset are revoked.
+6. `PUT /staff/:id/outlets` with a set that keeps one outlet, drops one and adds one. The kept row's `created_at` is unchanged.
+7. Race check: start a login with the old password and a password reset at the same moment (two terminals). Afterwards, no unrevoked session may exist with a `created_at` earlier than the reset.
 
 ## Docker (application only)
 

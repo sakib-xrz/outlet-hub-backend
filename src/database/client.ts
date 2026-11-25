@@ -1,7 +1,7 @@
 import { PrismaPg } from '@prisma/adapter-pg';
 import type { PoolConfig } from 'pg';
 import type { AppConfig } from '@/config/env.js';
-import { PrismaClient } from '@/generated/prisma/client.js';
+import { type Prisma, PrismaClient } from '@/generated/prisma/client.js';
 
 export type DatabaseConfig = Pick<
   AppConfig,
@@ -36,3 +36,4 @@ export function createPrismaClient(config: DatabaseConfig): PrismaClient {
 }
 
 export type DatabaseClient = PrismaClient;
+export type DatabaseExecutor = PrismaClient | Prisma.TransactionClient;
