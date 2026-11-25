@@ -7,6 +7,7 @@ declare global {
       id: string;
       log: Logger;
       user?: AuthenticatedUser;
+      validated?: { body?: unknown; params?: unknown; query?: unknown };
     }
   }
 }

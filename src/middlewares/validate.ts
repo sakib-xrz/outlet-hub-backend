@@ -15,7 +15,8 @@ export function validate(schemas: RequestSchemas): RequestHandler {
         }));
         return next(new BadRequestError('Validation failed', 'VALIDATION_ERROR', errors));
       }
-      Object.assign(request[key] as object, result.data);
+      if (key !== 'query') Object.assign(request[key] as object, result.data);
+      request.validated = { ...request.validated, [key]: result.data };
     }
     return next();
   };

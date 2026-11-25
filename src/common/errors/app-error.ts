@@ -39,7 +39,7 @@ export class NotFoundError extends AppError {
 }
 
 export class ConflictError extends AppError {
-  public constructor(message = 'Resource conflict') {
-    super(409, 'CONFLICT', message);
+  public constructor(message = 'Resource conflict', errors?: ErrorDetail[]) {
+    super(409, 'CONFLICT', message, errors);
   }
 }

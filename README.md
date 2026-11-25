@@ -1,6 +1,6 @@
 # OutletHub Backend
 
-Production-oriented backend foundation for OutletHub, a future multi-outlet POS management system. This repository intentionally contains only platform infrastructure, authentication/session management, health checks, documentation, and engineering tooling. It does **not** contain outlet, menu, inventory, sales, receipt, reporting, or synchronization features.
+Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, and **Outlet Management** (phase 1). Staff, menu, inventory, sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
 
 ## Stack
 
@@ -26,14 +26,16 @@ src/
 ├── generated/prisma/       # generated; ignored and recreated during install/build
 ├── middlewares/            # HTTP cross-cutting concerns
 ├── modules/
+│   ├── access/             # outlet-access checks (membership, HQ scope)
 │   ├── auth/               # routes → controller → service → repository
-│   └── health/             # liveness and readiness
+│   ├── health/             # liveness and readiness
+│   └── outlets/            # outlet management
 ├── routes/                 # versioned route composition
 ├── app.ts                  # side-effect-free Express factory
 └── server.ts               # process and server lifecycle
 prisma/
 ├── migrations/             # immutable SQL migration history
-├── schema.prisma           # authentication models only
+├── schema.prisma           # full domain schema (later phases use more of it)
 └── seed.ts                 # explicitly invoked HQ administrator seed
 tests/unit/                 # database-independent unit tests
 ```
@@ -227,6 +229,91 @@ Errors follow:
 }
 ```
 
+## Outlets API
+
+All endpoints are under `/api/v1/outlets`, require `Authorization: Bearer <token>`, and use the standard response envelope. Full schemas are in `/openapi.json` and in Swagger UI (development only).
+
+| Method  | Path                        | Access                                     | Result                                       |
+| ------- | --------------------------- | ------------------------------------------ | -------------------------------------------- |
+| `GET`   | `/outlets`                  | Any authenticated user (scoped)            | `{ items, pagination }`                      |
+| `GET`   | `/outlets/:outletId`        | HQ admin; staff with access to that outlet | `{ outlet }`                                 |
+| `POST`  | `/outlets`                  | `HQ_ADMIN`                                 | `201 { outlet }`; `409` on duplicate code    |
+| `PATCH` | `/outlets/:outletId`        | `HQ_ADMIN`                                 | `{ outlet }`; name and/or address only       |
+| `PATCH` | `/outlets/:outletId/status` | `HQ_ADMIN`                                 | `{ outlet }`; body `{ "isActive": boolean }` |
+
+**Outlet fields:** `id`, `code`, `name`, `address` (nullable), `isActive`, `createdAt`, `updatedAt`.
+
+**Listing:**
+
+| Parameter   | Values                                                       | Default     |
+| ----------- | ------------------------------------------------------------ | ----------- |
+| `page`      | integer ≥ 1                                                  | `1`         |
+| `limit`     | 1–100                                                        | `20`        |
+| `search`    | up to 100 characters; matches code or name, case-insensitive | none        |
+| `status`    | `all`, `active`, `inactive`                                  | `all`       |
+| `sortBy`    | `code`, `name`, `createdAt`, `updatedAt`                     | `createdAt` |
+| `sortOrder` | `asc`, `desc`                                                | `desc`      |
+
+- `pagination` is `{ page, limit, total, totalPages }`.
+- Results are always ordered by `id` as a tie-breaker, so pages don't overlap or skip rows.
+- Unknown or repeated query parameters return 400.
+
+**Authorization:**
+
+- HQ admins can list and read every outlet, including inactive ones.
+- Staff can list and read only **active** outlets they are members of. The restriction is part of the database query for both the page and the total count; nothing is filtered in memory.
+- A staff member reading any other outlet gets 403. An HQ admin reading a missing outlet gets 404.
+- Create, update and status changes are `HQ_ADMIN` only, enforced by `authorize` on the route. The frontend's hidden buttons are UX only.
+- `authenticate` re-checks on every request that the user is active and has the given role, so a deactivation or role change applies immediately.
+
+**Validation and normalization:**
+
+- **Code:** trimmed and uppercased. 2–20 characters of letters, digits and single hyphens (no leading, trailing or double hyphens).
+- **Name:** trimmed, 1–150 characters.
+- **Address:** trimmed, up to 500 characters. An empty string or `null` clears it.
+- **Bodies are strict.** `id`, `code` (on update), `isActive` (on update), timestamps and receipt fields are rejected rather than ignored, which prevents mass assignment.
+- **Update** needs at least one of `name` or `address`.
+- **Status** accepts only a JSON boolean.
+
+**Creation transaction:**
+
+- `POST /outlets` creates the outlet and its `ReceiptCounter` (`lastNumber = 0`) in one interactive Prisma transaction. If the counter insert fails, the outlet insert is rolled back.
+- The database unique index on `outlets.code` is the authority. A duplicate code, including two concurrent creations, raises Prisma `P2002`, which returns `409 CONFLICT` with `errors: [{ field: "body.code" }]`.
+
+**Codes are immutable.** No endpoint accepts `code` after creation. This keeps receipt and reporting references stable.
+
+**Activation and deactivation:**
+
+- The status endpoint only flips `is_active`.
+- Memberships, outlet menu items and stock, sales, sale items and the receipt counter are never deleted or reset.
+- Repeating the current status returns the outlet unchanged; `updatedAt` is not bumped.
+- There is no hard delete.
+- Because staff access checks query `outlet.is_active` on every request, a deactivated outlet is excluded from staff access immediately.
+
+**Rules for future sales and inventory modules:**
+
+- Run `OutletAccessService.assertCanAccessOutlet(user, outletId, tx)` inside the business transaction.
+- Re-read the outlet row with a row lock in the same transaction (`SELECT … FROM outlets WHERE id = $1 FOR SHARE`), and reject the operation if `is_active` is false.
+- A shared lock blocks a concurrent deactivation until the sale commits, and any sale that starts after the deactivation sees `is_active = false`.
+- A transaction-scoped check alone does not close every race; it is this lock that serializes the sale against the status change.
+- The status endpoint currently uses a plain `UPDATE`, which takes a row lock and therefore waits for sales holding `FOR SHARE`.
+
+**Testing:**
+
+- `tests/unit/outlets.test.ts` covers HTTP behavior: validation, normalization, roles, staff scope, 400/401/403/404/409, and idempotent status changes.
+- `tests/unit/outlet-repository.test.ts` covers query shape and the creation transaction.
+- These tests use mocked stores and a fake Prisma client. They verify the _orchestration_ (same transaction client, failures propagate), not real PostgreSQL atomicity. That is covered by the manual check below.
+
+### Manual database check (run only with approval; it writes to the shared database)
+
+1. Start the API and sign in as an HQ admin to get an access token.
+2. `POST /outlets {"code":" smoke-01 ","name":"Smoke"}` → 201 with code `SMOKE-01`. Then run `SELECT last_number FROM receipt_counters WHERE outlet_id = '<id>'` and confirm it is `0`.
+3. Send the same `POST` twice in parallel. One returns 201 and the other 409.
+4. `PATCH /outlets/<id>/status {"isActive":false}`, then repeat it. Both return 200 with `isActive: false`, and `updated_at` changes only once.
+5. Sign in as a staff user who has a membership row for the outlet. `GET /outlets/<id>` returns 403 while the outlet is inactive and 200 after reactivation. `GET /outlets` shows the outlet only while it is active.
+6. `PATCH /outlets/<id> {"code":"X-1"}` returns 400, and the code is unchanged.
+7. Optional rollback check, only on a throwaway database: drop the counter table's write permission for the API role (`REVOKE INSERT ON receipt_counters FROM <role>`). `POST /outlets` should then return 500 with no new row in `outlets`. Restore the permission afterwards.
+
 ## Docker (application only)
 
 The Dockerfile has these stages:
@@ -249,7 +336,7 @@ Compose has no database service. It reads `.env.production` at runtime and publi
 ## Coolify deployment
 
 1. **Database:** create the PostgreSQL resource in Coolify. Copy its **internal** connection URL for the API, since the API runs on the same server. Use the public URL only for local access (see above).
-2. **Application:** add a resource from the Git repository. Use build pack **Dockerfile**, base directory `/backend`, and Dockerfile `Dockerfile` (the final stage, `production`, is the default target). Set the port to `3000`, or whatever `PORT` you set.
+2. **Application:** add a resource from the Git repository. Use build pack **Dockerfile**, base directory `/` (this repository's root), and Dockerfile `Dockerfile` (the final stage, `production`, is the default target). Set the port to `3000`, or whatever `PORT` you set.
 3. **Domain/HTTPS:** assign the domain (for example `https://api.example.com`). Coolify's Traefik proxy gets the certificate and terminates TLS. It forwards `X-Forwarded-Proto` and `X-Forwarded-For`.
 4. **Environment variables** (runtime, not build-time). Mark secrets as secret:
 

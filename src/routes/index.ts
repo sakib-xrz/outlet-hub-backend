@@ -7,6 +7,12 @@ import { createAuthRouter } from '@/modules/auth/auth.route.js';
 import { AuthService } from '@/modules/auth/auth.service.js';
 import { TokenService } from '@/modules/auth/token.service.js';
 import { authenticate } from '@/middlewares/authenticate.js';
+import { OutletAccessRepository } from '@/modules/access/outlet-access.repository.js';
+import { OutletAccessService } from '@/modules/access/outlet-access.service.js';
+import { OutletController } from '@/modules/outlets/outlet.controller.js';
+import { OutletRepository } from '@/modules/outlets/outlet.repository.js';
+import { createOutletRouter } from '@/modules/outlets/outlet.route.js';
+import { OutletService } from '@/modules/outlets/outlet.service.js';
 import { HealthController } from '@/modules/health/health.controller.js';
 import { createHealthRouter } from '@/modules/health/health.route.js';
 
@@ -21,6 +27,10 @@ export function createApiRouter(database: DatabaseClient, config: AppConfig): Ro
     '/auth',
     createAuthRouter(new AuthController(authService, config), requireAuth, config),
   );
+  const outletAccess = new OutletAccessService(new OutletAccessRepository(database));
+  const outletController = new OutletController(new OutletService(new OutletRepository(database)));
+
+  router.use('/outlets', createOutletRouter(outletController, requireAuth, outletAccess));
   router.use('/health', createHealthRouter(new HealthController(database, config)));
   return router;
 }

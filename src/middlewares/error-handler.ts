@@ -1,12 +1,13 @@
 import type { ErrorRequestHandler } from 'express';
 import { Prisma } from '@/generated/prisma/client.js';
-import { AppError, ConflictError } from '@/common/errors/app-error.js';
+import { AppError, ConflictError, NotFoundError } from '@/common/errors/app-error.js';
 
 function normalizeError(error: unknown): AppError {
   if (error instanceof AppError) return error;
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
     if (error.code === 'P2002')
       return new ConflictError('A resource with these values already exists');
+    if (error.code === 'P2025') return new NotFoundError();
     return new AppError(500, 'DATABASE_ERROR', 'A database operation failed', undefined, false);
   }
   if (error instanceof SyntaxError && 'status' in error && error.status === 400) {
