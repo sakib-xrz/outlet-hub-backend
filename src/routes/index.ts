@@ -29,6 +29,10 @@ import { InventoryController } from '@/modules/inventory/inventory.controller.js
 import { InventoryRepository } from '@/modules/inventory/inventory.repository.js';
 import { createInventoryRouter } from '@/modules/inventory/inventory.route.js';
 import { InventoryService } from '@/modules/inventory/inventory.service.js';
+import { SaleController } from '@/modules/sales/sale.controller.js';
+import { SaleRepository } from '@/modules/sales/sale.repository.js';
+import { createSaleRouter } from '@/modules/sales/sale.route.js';
+import { SaleService } from '@/modules/sales/sale.service.js';
 import { HealthController } from '@/modules/health/health.controller.js';
 import { createHealthRouter } from '@/modules/health/health.route.js';
 
@@ -60,6 +64,11 @@ export function createApiRouter(database: DatabaseClient, config: AppConfig): Ro
   router.use(
     '/outlets/:outletId/inventory',
     createInventoryRouter(inventoryController, requireAuth, outletAccess),
+  );
+  const saleController = new SaleController(new SaleService(new SaleRepository(database)));
+  router.use(
+    '/outlets/:outletId/sales',
+    createSaleRouter(saleController, requireAuth, outletAccess),
   );
   router.use('/outlets', createOutletRouter(outletController, requireAuth, outletAccess));
   const staffController = new StaffController(new StaffService(new StaffRepository(database)));

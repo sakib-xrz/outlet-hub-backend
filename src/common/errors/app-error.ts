@@ -1,4 +1,8 @@
-export type ErrorDetail = { field?: string; message: string };
+export type ErrorDetail = {
+  field?: string;
+  message: string;
+  meta?: Record<string, string | number>;
+};
 
 export class AppError extends Error {
   public constructor(

@@ -71,6 +71,15 @@ const outletMenuItemEnvelope = responseEnvelope({
   properties: { outletMenuItem: { $ref: '#/components/schemas/OutletMenuItem' } },
 });
 
+const saleEnvelope = responseEnvelope({
+  type: 'object',
+  required: ['sale', 'replayed'],
+  properties: {
+    sale: { $ref: '#/components/schemas/Sale' },
+    replayed: { type: 'boolean', description: 'true when an existing sale was returned' },
+  },
+});
+
 export const openApiDocument: OpenAPIV3.Document = {
   openapi: '3.0.3',
   info: {
@@ -290,6 +299,76 @@ export const openApiDocument: OpenAPIV3.Document = {
           isEnabled: { type: 'boolean' },
           isSellable: { type: 'boolean' },
           updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      MoneyTotal: {
+        type: 'string',
+        pattern: '^(0|[1-9]\\d{0,13})\\.\\d{2}$',
+        description: 'Line or sale total (DECIMAL(16,2)), up to 99999999999999.99',
+        example: '800.00',
+      },
+      SaleLine: {
+        type: 'object',
+        required: ['menuItemId', 'itemName', 'quantity', 'unitPrice', 'lineTotal'],
+        description: 'Immutable snapshot taken when the sale committed',
+        properties: {
+          menuItemId: { type: 'string', format: 'uuid' },
+          itemName: { type: 'string' },
+          quantity: { type: 'integer', minimum: 1 },
+          unitPrice: { $ref: '#/components/schemas/Money' },
+          lineTotal: { $ref: '#/components/schemas/MoneyTotal' },
+        },
+      },
+      Sale: {
+        type: 'object',
+        required: [
+          'id',
+          'outletId',
+          'outletCode',
+          'outletName',
+          'receiptNumber',
+          'receiptCode',
+          'requestId',
+          'createdById',
+          'totalAmount',
+          'createdAt',
+          'items',
+        ],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          outletId: { type: 'string', format: 'uuid' },
+          outletCode: { type: 'string' },
+          outletName: { type: 'string', description: 'Current outlet name (not snapshotted)' },
+          receiptNumber: { type: 'integer', minimum: 1, description: 'Sequential per outlet' },
+          receiptCode: { type: 'string', example: 'MIRPUR-01-000101' },
+          requestId: { type: 'string', format: 'uuid' },
+          createdById: { type: 'string', format: 'uuid' },
+          totalAmount: { $ref: '#/components/schemas/MoneyTotal' },
+          createdAt: { type: 'string', format: 'date-time' },
+          items: { type: 'array', items: { $ref: '#/components/schemas/SaleLine' } },
+        },
+      },
+      SaleSummary: {
+        type: 'object',
+        required: [
+          'id',
+          'receiptNumber',
+          'receiptCode',
+          'totalAmount',
+          'lineCount',
+          'unitCount',
+          'createdById',
+          'createdAt',
+        ],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          receiptNumber: { type: 'integer' },
+          receiptCode: { type: 'string' },
+          totalAmount: { $ref: '#/components/schemas/MoneyTotal' },
+          lineCount: { type: 'integer', description: 'Distinct items in the sale' },
+          unitCount: { type: 'integer', description: 'Total units across all lines' },
+          createdById: { type: 'string', format: 'uuid' },
+          createdAt: { type: 'string', format: 'date-time' },
         },
       },
       User: {
@@ -1295,6 +1374,175 @@ export const openApiDocument: OpenAPIV3.Document = {
             'Codes: OUTLET_INACTIVE, STOCK_CHANGED (stale expectedStockQuantity), INSUFFICIENT_STOCK, STOCK_LIMIT_EXCEEDED, CONCURRENT_UPDATE',
           ),
           ...hqAdminErrors,
+        },
+      },
+    },
+    '/outlets/{outletId}/sales': {
+      parameters: [outletIdParameter],
+      post: {
+        tags: ['Sales'],
+        summary: 'Create a sale (OUTLET_STAFF of an active outlet)',
+        description:
+          'Idempotent by (outletId, requestId). Generate one UUID per logical sale and reuse it for every retry. A new request returns 201; resending the same request id and payload by the same cashier returns 200 with the original sale (no further stock deduction or receipt number). A different payload or another cashier using the id gets 409 IDEMPOTENCY_CONFLICT. Prices, totals, names and receipt numbers come from the server; expectedUnitPrice is the price the cashier saw and must equal the current effective price (otherwise 409 PRICE_CHANGED). Duplicate menuItemId entries are combined. The sale is all-or-nothing.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['requestId', 'items'],
+                properties: {
+                  requestId: { type: 'string', format: 'uuid' },
+                  items: {
+                    type: 'array',
+                    minItems: 1,
+                    maxItems: 100,
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      required: ['menuItemId', 'quantity', 'expectedUnitPrice'],
+                      properties: {
+                        menuItemId: { type: 'string', format: 'uuid' },
+                        quantity: { type: 'integer', minimum: 1, maximum: 2147483647 },
+                        expectedUnitPrice: { $ref: '#/components/schemas/Money' },
+                      },
+                    },
+                  },
+                },
+              },
+              example: {
+                requestId: '550e8400-e29b-41d4-a716-446655440000',
+                items: [
+                  {
+                    menuItemId: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d',
+                    quantity: 2,
+                    expectedUnitPrice: '250.00',
+                  },
+                ],
+              },
+            },
+          },
+        },
+        responses: {
+          '201': { description: 'Sale completed', content: { 'application/json': saleEnvelope } },
+          '200': {
+            description: 'Idempotent replay of an already completed sale',
+            content: { 'application/json': saleEnvelope },
+          },
+          '400': errorResponse('Invalid request', 'ValidationError'),
+          '401': errorResponse('Authentication required'),
+          '403': errorResponse('Not an active OUTLET_STAFF member of this outlet'),
+          '404': errorResponse('Outlet not found'),
+          '409': errorResponse(
+            'Codes: OUTLET_INACTIVE, ITEM_UNAVAILABLE, INSUFFICIENT_STOCK, PRICE_CHANGED, IDEMPOTENCY_CONFLICT, SALE_TOTAL_LIMIT_EXCEEDED, RECEIPT_LIMIT_EXCEEDED, CONCURRENT_UPDATE. Item conflicts list errors[].meta { menuItemId, currentUnitPrice | availableQuantity }.',
+            'ValidationError',
+          ),
+        },
+      },
+      get: {
+        tags: ['Sales'],
+        summary: "List an outlet's sales",
+        description:
+          'HQ_ADMIN: any existing outlet. OUTLET_STAFF: their active outlets only (restriction applied in the query and count).',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { in: 'query', name: 'page', schema: { type: 'integer', minimum: 1, default: 1 } },
+          {
+            in: 'query',
+            name: 'limit',
+            schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+          },
+          {
+            in: 'query',
+            name: 'search',
+            description: 'Receipt number or code, e.g. 101 or MIRPUR-01-000101 (exact match)',
+            schema: { type: 'string', maxLength: 40 },
+          },
+          { in: 'query', name: 'from', schema: { type: 'string', format: 'date-time' } },
+          {
+            in: 'query',
+            name: 'to',
+            description: 'At most 366 days after from',
+            schema: { type: 'string', format: 'date-time' },
+          },
+          {
+            in: 'query',
+            name: 'sortBy',
+            schema: {
+              type: 'string',
+              enum: ['createdAt', 'receiptNumber', 'totalAmount'],
+              default: 'createdAt',
+            },
+          },
+          {
+            in: 'query',
+            name: 'sortOrder',
+            schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
+          },
+        ],
+        responses: {
+          '200': {
+            description: 'Sales page',
+            content: {
+              'application/json': responseEnvelope({
+                type: 'object',
+                required: ['items', 'pagination'],
+                properties: {
+                  items: { type: 'array', items: { $ref: '#/components/schemas/SaleSummary' } },
+                  pagination: { $ref: '#/components/schemas/Pagination' },
+                },
+              }),
+            },
+          },
+          '400': errorResponse('Invalid query', 'ValidationError'),
+          '401': errorResponse('Authentication required'),
+          '403': errorResponse('No access to this outlet'),
+          '404': errorResponse('Outlet not found'),
+        },
+      },
+    },
+    '/outlets/{outletId}/sales/by-request/{requestId}': {
+      parameters: [
+        outletIdParameter,
+        {
+          in: 'path',
+          name: 'requestId',
+          required: true,
+          schema: { type: 'string', format: 'uuid' },
+        },
+      ],
+      get: {
+        tags: ['Sales'],
+        summary: 'Recover a sale by its request id (originating cashier)',
+        description:
+          'Returns the completed sale created by the caller with this request id. 404 means no committed sale is visible yet; it does not prove the original request will never commit. Retry only with the same request id and payload.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': { description: 'Sale found', content: { 'application/json': saleEnvelope } },
+          '401': errorResponse('Authentication required'),
+          '403': errorResponse('No access to this outlet'),
+          '404': errorResponse('No completed sale for this request'),
+        },
+      },
+    },
+    '/outlets/{outletId}/sales/{saleId}': {
+      parameters: [
+        outletIdParameter,
+        { in: 'path', name: 'saleId', required: true, schema: { type: 'string', format: 'uuid' } },
+      ],
+      get: {
+        tags: ['Sales'],
+        summary: 'Get a sale and its receipt lines',
+        description: 'Scoped to both outletId and saleId; lines are historical snapshots.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': { description: 'Sale', content: { 'application/json': saleEnvelope } },
+          '400': errorResponse('Invalid ids', 'ValidationError'),
+          '401': errorResponse('Authentication required'),
+          '403': errorResponse('No access to this outlet'),
+          '404': errorResponse('Sale not found'),
         },
       },
     },

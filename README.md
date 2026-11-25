@@ -1,6 +1,6 @@
 # OutletHub Backend
 
-Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, **Outlet Management** (phase 1), **Staff & Outlet Membership Management** (phase 2), **Master Menu Management** (phase 3), **Outlet Menu Assignment & Price Overrides** (phase 4) and **Inventory Management** (phase 5). sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
+Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, **Outlet Management** (phase 1), **Staff & Outlet Membership Management** (phase 2), **Master Menu Management** (phase 3), **Outlet Menu Assignment & Price Overrides** (phase 4), **Inventory Management** (phase 5) and **POS Sales & Sequential Receipts** (phase 6). Reporting is not implemented yet. sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
 
 ## Stack
 
@@ -33,6 +33,7 @@ src/
 │   ├── menu-items/         # master menu (HQ only)
 │   ├── outlet-menu-items/  # outlet menu assignments and price overrides
 │   ├── outlets/            # outlet management
+│   ├── sales/              # POS sales, receipts, idempotency
 │   └── staff/              # staff accounts and outlet memberships
 ├── routes/                 # versioned route composition
 ├── app.ts                  # side-effect-free Express factory
@@ -546,17 +547,18 @@ Every transaction that writes these tables takes row locks in this order. It is 
 users  →  outlets  →  receipt_counters  →  outlet_menu_items (by menu_item_id)  →  menu_items (by id)
 ```
 
-| Path                                  | Locks taken                                                                                                                                |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Login / refresh                       | `users FOR SHARE`                                                                                                                          |
-| Staff status / password reset         | `users FOR UPDATE`, then sessions                                                                                                          |
-| Membership replacement / staff create | `users FOR UPDATE` (replacement), then `outlets FOR SHARE` (by id)                                                                         |
-| Outlet status                         | `UPDATE outlets` (row lock on that outlet only)                                                                                            |
-| Master item status / edit             | `UPDATE menu_items` (row lock on that item only)                                                                                           |
-| **Assign**                            | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE` (if one exists), master item `FOR SHARE`, `INSERT`                    |
-| **Price override**                    | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE`, `UPDATE override_price` only                                         |
-| **Assignment status**                 | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE`, master item `FOR SHARE` (reactivation only), `UPDATE is_active` only |
-| **Stock adjustment**                  | admin `users FOR SHARE`, outlet `FOR SHARE` (must be active), assignment `FOR UPDATE`, `UPDATE stock_quantity` only                        |
+| Path                                  | Locks taken                                                                                                                                                                                                                                                   |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Login / refresh                       | `users FOR SHARE`                                                                                                                                                                                                                                             |
+| Staff status / password reset         | `users FOR UPDATE`, then sessions                                                                                                                                                                                                                             |
+| Membership replacement / staff create | `users FOR UPDATE` (replacement), then `outlets FOR SHARE` (by id)                                                                                                                                                                                            |
+| Outlet status                         | `UPDATE outlets` (row lock on that outlet only)                                                                                                                                                                                                               |
+| Master item status / edit             | `UPDATE menu_items` (row lock on that item only)                                                                                                                                                                                                              |
+| **Assign**                            | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE` (if one exists), master item `FOR SHARE`, `INSERT`                                                                                                                                       |
+| **Price override**                    | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE`, `UPDATE override_price` only                                                                                                                                                            |
+| **Assignment status**                 | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE`, master item `FOR SHARE` (reactivation only), `UPDATE is_active` only                                                                                                                    |
+| **Stock adjustment**                  | admin `users FOR SHARE`, outlet `FOR SHARE` (must be active), assignment `FOR UPDATE`, `UPDATE stock_quantity` only                                                                                                                                           |
+| **Sale**                              | cashier `users FOR SHARE` (+ membership check), outlet `FOR SHARE`, `receipt_counters FOR UPDATE`, assignments `FOR UPDATE` by `menu_item_id`, master items `FOR SHARE` by `id`, guarded stock `UPDATE`s, counter `UPDATE … RETURNING`, `INSERT` sale + lines |
 
 - **Admin re-check:** each write re-checks, under a shared lock, that the acting user is still an active `HQ_ADMIN`.
 - **Parent checks are atomic:** they happen while the parents are locked `FOR SHARE`, so a concurrent outlet or master-item deactivation (an `UPDATE`) either waits for the assignment to commit or is seen as inactive.
@@ -713,6 +715,152 @@ The adjustment runs in one Read Committed transaction:
 5. **Database safety net:** `UPDATE outlet_menu_items SET stock_quantity = -1 WHERE …` fails with `outlet_menu_items_stock_quantity_nonnegative`.
 6. **Failure leaves the balance alone:** a rejected adjustment leaves `stock_quantity` unchanged.
 7. **No side effects:** after adjustments, `override_price`, `is_active`, `menu_items.*`, `receipt_counters` and `sales` are unchanged.
+
+## Sales API (POS and receipts)
+
+Endpoints are nested under an outlet: `/api/v1/outlets/:outletId/sales`.
+
+| Method | Path                                             | Access                                              |
+| ------ | ------------------------------------------------ | --------------------------------------------------- |
+| `POST` | `/outlets/:outletId/sales`                       | `OUTLET_STAFF` member of the **active** outlet      |
+| `GET`  | `/outlets/:outletId/sales`                       | HQ admin (any outlet); staff (their active outlets) |
+| `GET`  | `/outlets/:outletId/sales/by-request/:requestId` | the originating cashier only                        |
+| `GET`  | `/outlets/:outletId/sales/:saleId`               | HQ admin; staff of that active outlet               |
+
+The `by-request` route is registered before `/:saleId`.
+
+- **HQ admins are read-only** for sales in this phase.
+- **Staff restriction in the database:** every staff read carries the restriction in the Prisma `where` (outlet active and caller a member), for both the page and the count.
+- **No cross-outlet lookups:** details are looked up by **both** `outletId` and `saleId`, so a sale id from another outlet returns 404.
+
+### Request
+
+```json
+{
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "items": [
+    { "menuItemId": "…", "quantity": 2, "expectedUnitPrice": "250.00" },
+    { "menuItemId": "…", "quantity": 3, "expectedUnitPrice": "100.00" }
+  ]
+}
+```
+
+**Validation:**
+
+- `requestId` and `menuItemId` must be UUIDs, normalized to lowercase.
+- 1–100 entries.
+- Quantities are JSON integers from 1 to 2147483647.
+- `expectedUnitPrice` uses the money contract.
+- Bodies are strict: ids, totals, line totals, names, receipt numbers, cashier and timestamps from the client are rejected.
+
+**Normalization** (`sale-calculation.ts`):
+
+- Entries for the same item are combined.
+- The same item with different expected prices returns 400.
+- A combined quantity above `INTEGER` returns 400.
+- Lines are sorted by `menuItemId`.
+
+### Response
+
+`{ sale, replayed }`, with HTTP **201** for a new sale and **200** for an idempotent replay.
+
+- **Sale fields:** `id`, `outletId`, `outletCode`, `outletName`, `receiptNumber`, `receiptCode`, `requestId`, `createdById`, `totalAmount`, `createdAt`, and `items[] { menuItemId, itemName, quantity, unitPrice, lineTotal }`.
+- **`receiptCode`** is derived, not stored: `<outlet code>-<receipt number padded to 6>`, for example `MIRPUR-01-000101`. Numbers above 999999 are never truncated.
+- **`requestHash` is never returned.**
+- **History items** are compact: `{ id, receiptNumber, receiptCode, totalAmount, lineCount, unitCount, createdById, createdAt }`. `lineCount` is the number of distinct items, and `unitCount` is the sum of quantities, read with one bounded `groupBy` for the page.
+
+**History filters:**
+
+- Pagination.
+- `search`: a receipt number or code, such as `101` or `MIRPUR-01-000101`, matched exactly on the number.
+- `from`/`to` (ISO, at most 366 days apart).
+- `sortBy`: `createdAt`, `receiptNumber` or `totalAmount`, with `id` as the tie-breaker.
+
+### Transaction (one Read Committed interactive transaction)
+
+1. `users FOR SHARE` for the cashier. Re-check that the account is active, the **current** role is `OUTLET_STAFF`, and an `outlet_memberships` row exists.
+   - Staff deactivation (`UPDATE users`) and membership replacement (`users FOR UPDATE`) conflict with this lock. A revocation therefore either waits for the sale or is seen by it, and is never applied halfway through.
+2. `outlets FOR SHARE`. The outlet must exist and be active (`OUTLET_INACTIVE`).
+3. `receipt_counters FOR UPDATE` for that outlet.
+   - This serializes sales **per outlet only**; other outlets proceed in parallel.
+   - A missing counter is a 500 `RECEIPT_COUNTER_MISSING` and is never silently recreated.
+4. **Idempotency check** under the counter lock: look up `(outlet_id, request_id)`.
+   - Same cashier and same `request_hash`: return the original sale. Nothing else runs.
+   - Different hash, or another cashier's request: `IDEMPOTENCY_CONFLICT`, which reveals nothing about the other sale.
+   - This runs before any price or stock check, so a replay still succeeds after the original sale emptied the stock or a price changed.
+5. Assignments `FOR UPDATE` for every line, in **one** `ORDER BY menu_item_id` query. Stock and `override_price` are read from the locked rows.
+6. Master items `FOR SHARE`, in one `ORDER BY id` query. Name, `base_price` and `is_active` are read from the locked rows.
+7. Validate every line **before any write**:
+   - unassigned, inactive assignment or inactive master item → `ITEM_UNAVAILABLE`;
+   - `override_price ?? base_price` different from `expectedUnitPrice` → `PRICE_CHANGED`;
+   - not enough stock → `INSUFFICIENT_STOCK`.
+   - Each error includes `errors[].meta` with `menuItemId` and `currentUnitPrice` or `availableQuantity`.
+8. Exact totals (below). Limits: `SALE_TOTAL_LIMIT_EXCEEDED`, and `RECEIPT_LIMIT_EXCEEDED` when `last_number = 2147483647`.
+9. Deduct stock with guarded updates, `UPDATE … SET stock_quantity = stock_quantity − q WHERE outlet_id = $o AND menu_item_id = $m AND stock_quantity >= q`. Each must affect exactly 1 row, or the transaction throws. `CHECK (stock_quantity >= 0)` is the final safety net.
+10. `UPDATE receipt_counters SET last_number = last_number + 1 … RETURNING last_number` gives the receipt number.
+11. `INSERT` the sale (server cashier id, receipt number, request id, hash and total), then `createMany` sale lines with the composite keys `(sale_id, outlet_id)` and `(outlet_id, menu_item_id)`, plus the name and price snapshot.
+12. Commit. The response is read back only **after** commit.
+
+**Rollback guarantees:**
+
+- Business refusals return before any write, so nothing is left behind.
+- Any thrown error in steps 9–11 aborts the whole transaction: stock, counter, sale and lines.
+- Because the counter is incremented inside the same transaction, **a failed sale never consumes a receipt number**, and numbers are gap-free within an outlet.
+- Receipt numbers never come from `MAX()+1`, `COUNT()`, timestamps, memory or a global sequence.
+
+**Retries (service):**
+
+- Only for Prisma `P2034`, a serialization failure or deadlock where PostgreSQL rolled the transaction back. Up to 3 attempts with a short back-off, using the same `requestId` and hash.
+- A `P2002` race on `(outlet_id, request_id)` is retried once and resolves as a replay.
+- Exhausting the attempts gives 409 `CONCURRENT_UPDATE`.
+- Errors where the commit outcome is unknown, such as a dropped connection, are **not** retried. The client resolves them with idempotent replay or the `by-request` endpoint.
+- Consistent lock ordering reduces deadlocks but does not rule them out.
+
+### Exact money
+
+- Prices are read from PostgreSQL as text (`::text`) and parsed strictly as `^\d{1,14}\.\d{2}$`. `NaN` or any malformed value throws and rolls back.
+- Arithmetic uses **BigInt minor units**. Prisma's `Decimal` (decimal.js) defaults to 20 significant digits, which a 12-digit price × 10-digit quantity can exceed, so it is not used for multiplication.
+- Unit prices must stay within `DECIMAL(12,2)`. Line totals and the sale total must stay at or below `99999999999999.99` (`DECIMAL(16,2)`).
+- The service asserts that the total equals the sum of the lines.
+- All amounts are returned as two-decimal strings. The currency is BDT.
+
+### Snapshots and immutability
+
+- Sale lines store `item_name`, `unit_price` and `line_total`, so receipts never use current catalog prices.
+- There is no update or delete endpoint for sales.
+- `outletName` is **not** snapshotted (the schema has no column for it), so historical receipts show the outlet's current name. The outlet `code` is immutable.
+
+### Concurrency verification (real PostgreSQL)
+
+`scripts/verify-sales-concurrency.ts` runs the real services and repositories against a **disposable** PostgreSQL. It refuses to start unless `SALES_VERIFICATION_DATABASE_URL` and `CONFIRM_DISPOSABLE_DATABASE=yes` are set, and that URL differs from the configured `DATABASE_URL`.
+
+```bash
+# 1. Start a throwaway PostgreSQL 18 (any host). Never point this at the shared database.
+# 2. Apply migrations to it:
+DATABASE_URL=<disposable-url> pnpm db:migrate:deploy
+# 3. Run the scenarios:
+SALES_VERIFICATION_DATABASE_URL=<disposable-url> CONFIRM_DISPOSABLE_DATABASE=yes pnpm verify:sales-concurrency
+```
+
+| Scenario                       | Setup                                                         | Expected                                                                      |
+| ------------------------------ | ------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| A. Overselling                 | stock 10, two concurrent sales of 7                           | one OK and one `INSUFFICIENT_STOCK`; stock 3; counter +1; 1 sale              |
+| B. Concurrent valid sales      | stock 20, ten concurrent sales of 1                           | all OK; stock 10; receipts 1..10, consecutive                                 |
+| C. Concurrent idempotency      | same request id × 10                                          | one sale; stock and counter changed once; every response has the same sale id |
+| D. Multi-item atomicity        | one line short of stock                                       | nothing changes (stock, counter, sales, lines)                                |
+| E. Independent outlets         | 5 + 5 concurrent sales in two outlets                         | each counter is 5; stock changes stay per outlet                              |
+| F. Sale vs. stock adjustment   | sell 4 while an admin adds 5, from 10                         | 11 (no lost update)                                                           |
+| G. Sale vs. price change       | sell while the base price changes and the override is cleared | either committed at the old price or `PRICE_CHANGED` with stock untouched     |
+| H. Sale vs. membership removal | sell while the cashier's memberships are replaced with `[]`   | either committed before, or `AUTHORIZATION_ERROR`; membership gone            |
+| I. Injected failure            | deduct stock and increment the counter, then throw            | stock and counter unchanged                                                   |
+
+The script prints PASS or FAIL per check and exits non-zero on any failure. **It has not been run**, because no disposable PostgreSQL was available and the shared database must not be used. The unit tests (`sale-calculation`, `sales`, `sale-repository`) use mocks: they prove the orchestration (lock order, writes only after validation, no writes on replay or refusal, errors propagating from every write step), **not** PostgreSQL's locking or atomicity.
+
+### Comparison with the documented design
+
+- **Same lock order as planned:** user → outlet → receipt counter → assignments → master items, as in the ERD and flowchart and the earlier "future sale" notes.
+- **Idempotency lookup placement:** runs _after_ the counter lock rather than before the transaction. This serializes duplicate submissions of the same request id, so they cannot both pass the lookup.
+- **No structural schema changes.**
 
 ## Docker (application only)
 
