@@ -65,6 +65,12 @@ const menuItemIdParameter: OpenAPIV3.ParameterObject = {
   schema: { type: 'string', format: 'uuid' },
 };
 
+const outletMenuItemEnvelope = responseEnvelope({
+  type: 'object',
+  required: ['outletMenuItem'],
+  properties: { outletMenuItem: { $ref: '#/components/schemas/OutletMenuItem' } },
+});
+
 export const openApiDocument: OpenAPIV3.Document = {
   openapi: '3.0.3',
   info: {
@@ -201,6 +207,54 @@ export const openApiDocument: OpenAPIV3.Document = {
           description: { type: 'string', maxLength: 1000, nullable: true },
           basePrice: { $ref: '#/components/schemas/Money' },
           isActive: { type: 'boolean' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      OutletMenuItem: {
+        type: 'object',
+        description:
+          'An outlet assignment of a master menu item (unique per outlet). effectivePrice = overridePrice ?? basePrice. isEnabled = outletIsActive && menuItemIsActive && isActive; isSellable = isEnabled && stockQuantity > 0.',
+        required: [
+          'outletId',
+          'menuItemId',
+          'sku',
+          'name',
+          'description',
+          'basePrice',
+          'overridePrice',
+          'effectivePrice',
+          'priceSource',
+          'stockQuantity',
+          'isActive',
+          'outletIsActive',
+          'menuItemIsActive',
+          'isEnabled',
+          'isSellable',
+          'createdAt',
+          'updatedAt',
+        ],
+        properties: {
+          outletId: { type: 'string', format: 'uuid' },
+          menuItemId: { type: 'string', format: 'uuid' },
+          sku: { type: 'string' },
+          name: { type: 'string' },
+          description: { type: 'string', nullable: true },
+          basePrice: { $ref: '#/components/schemas/Money' },
+          overridePrice: {
+            allOf: [{ $ref: '#/components/schemas/Money' }],
+            nullable: true,
+            description:
+              'null means the master base price is used; "0.00" is a valid explicit price',
+          },
+          effectivePrice: { $ref: '#/components/schemas/Money' },
+          priceSource: { type: 'string', enum: ['BASE', 'OVERRIDE'] },
+          stockQuantity: { type: 'integer', minimum: 0, description: 'Read-only in this phase' },
+          isActive: { type: 'boolean', description: 'Assignment status' },
+          outletIsActive: { type: 'boolean' },
+          menuItemIsActive: { type: 'boolean', description: 'Master menu item status' },
+          isEnabled: { type: 'boolean' },
+          isSellable: { type: 'boolean' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
         },
@@ -835,6 +889,200 @@ export const openApiDocument: OpenAPIV3.Document = {
         responses: {
           '200': { description: 'Status set', content: { 'application/json': menuItemEnvelope } },
           '404': errorResponse('Menu item not found'),
+          ...hqAdminErrors,
+        },
+      },
+    },
+    '/outlets/{outletId}/menu-items': {
+      parameters: [outletIdParameter],
+      get: {
+        tags: ['Outlet menu'],
+        summary: "List an outlet's menu",
+        description:
+          'HQ_ADMIN: every assignment of any existing outlet (404 if the outlet is missing). OUTLET_STAFF: only for active outlets they belong to (403 otherwise), and only enabled items (outlet, master item and assignment all active), including enabled items with zero stock.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { in: 'query', name: 'page', schema: { type: 'integer', minimum: 1, default: 1 } },
+          {
+            in: 'query',
+            name: 'limit',
+            schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+          },
+          {
+            in: 'query',
+            name: 'search',
+            description: 'Case-insensitive match on master SKU or name',
+            schema: { type: 'string', maxLength: 100 },
+          },
+          {
+            in: 'query',
+            name: 'status',
+            description: 'Assignment status',
+            schema: { type: 'string', enum: ['all', 'active', 'inactive'], default: 'all' },
+          },
+          {
+            in: 'query',
+            name: 'sortBy',
+            schema: {
+              type: 'string',
+              enum: ['sku', 'name', 'createdAt', 'updatedAt'],
+              default: 'name',
+            },
+          },
+          {
+            in: 'query',
+            name: 'sortOrder',
+            schema: { type: 'string', enum: ['asc', 'desc'], default: 'asc' },
+          },
+        ],
+        responses: {
+          '200': {
+            description: 'Outlet menu page',
+            content: {
+              'application/json': responseEnvelope({
+                type: 'object',
+                required: ['items', 'pagination'],
+                properties: {
+                  items: { type: 'array', items: { $ref: '#/components/schemas/OutletMenuItem' } },
+                  pagination: { $ref: '#/components/schemas/Pagination' },
+                },
+              }),
+            },
+          },
+          '400': errorResponse('Invalid parameters', 'ValidationError'),
+          '401': errorResponse('Authentication required'),
+          '403': errorResponse('No access to this outlet'),
+          '404': errorResponse('Outlet not found'),
+        },
+      },
+      post: {
+        tags: ['Outlet menu'],
+        summary: 'Assign a master menu item to the outlet (HQ_ADMIN)',
+        description:
+          'Outlet and master item must exist and be active. Stock starts at 0 and the assignment is active. One assignment per (outlet, menu item): an existing one, active or inactive, returns 409 (reactivate inactive ones via /status).',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['menuItemId'],
+                properties: {
+                  menuItemId: { type: 'string', format: 'uuid' },
+                  overridePrice: {
+                    allOf: [{ $ref: '#/components/schemas/Money' }],
+                    nullable: true,
+                    default: null,
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': {
+            description: 'Assigned',
+            content: { 'application/json': outletMenuItemEnvelope },
+          },
+          '404': errorResponse('Outlet not found'),
+          '409': errorResponse(
+            'Already assigned, outlet inactive, or master item inactive',
+            'ValidationError',
+          ),
+          ...hqAdminErrors,
+        },
+      },
+    },
+    '/outlets/{outletId}/menu-items/{menuItemId}': {
+      parameters: [outletIdParameter, menuItemIdParameter],
+      get: {
+        tags: ['Outlet menu'],
+        summary: 'Get one outlet menu assignment',
+        description:
+          'Looked up by the (outletId, menuItemId) pair. Staff without outlet access get 403; staff with access get 404 for unassigned or disabled items.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'Assignment',
+            content: { 'application/json': outletMenuItemEnvelope },
+          },
+          '400': errorResponse('Invalid ids', 'ValidationError'),
+          '401': errorResponse('Authentication required'),
+          '403': errorResponse('No access to this outlet'),
+          '404': errorResponse('Outlet or assignment not found'),
+        },
+      },
+    },
+    '/outlets/{outletId}/menu-items/{menuItemId}/price': {
+      parameters: [outletIdParameter, menuItemIdParameter],
+      patch: {
+        tags: ['Outlet menu'],
+        summary: 'Set or clear the outlet price override (HQ_ADMIN)',
+        description:
+          'Updates only override_price. null restores the master base price (future base price changes then apply). Allowed on inactive assignments and outlets. Stock, status and sales are untouched.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['overridePrice'],
+                properties: {
+                  overridePrice: {
+                    allOf: [{ $ref: '#/components/schemas/Money' }],
+                    nullable: true,
+                  },
+                },
+              },
+              examples: {
+                override: { value: { overridePrice: '300.00' } },
+                inherit: { value: { overridePrice: null } },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Updated',
+            content: { 'application/json': outletMenuItemEnvelope },
+          },
+          '404': errorResponse('Outlet or assignment not found'),
+          ...hqAdminErrors,
+        },
+      },
+    },
+    '/outlets/{outletId}/menu-items/{menuItemId}/status': {
+      parameters: [outletIdParameter, menuItemIdParameter],
+      patch: {
+        tags: ['Outlet menu'],
+        summary: 'Activate or deactivate an assignment (HQ_ADMIN)',
+        description:
+          'Idempotent (no write when unchanged). Deactivation is a soft unassignment and is always allowed. Reactivation requires an active outlet and master item. Stock and overrides are preserved; nothing is deleted.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['isActive'],
+                properties: { isActive: { type: 'boolean' } },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Status set',
+            content: { 'application/json': outletMenuItemEnvelope },
+          },
+          '404': errorResponse('Outlet or assignment not found'),
+          '409': errorResponse('Cannot reactivate while the outlet or master item is inactive'),
           ...hqAdminErrors,
         },
       },

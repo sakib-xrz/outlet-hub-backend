@@ -1,6 +1,6 @@
 # OutletHub Backend
 
-Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, **Outlet Management** (phase 1), **Staff & Outlet Membership Management** (phase 2) and **Master Menu Management** (phase 3). Outlet menu assignment, inventory, sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
+Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, **Outlet Management** (phase 1), **Staff & Outlet Membership Management** (phase 2), **Master Menu Management** (phase 3) and **Outlet Menu Assignment & Price Overrides** (phase 4). Inventory, sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
 
 ## Stack
 
@@ -30,6 +30,7 @@ src/
 │   ├── auth/               # routes → controller → service → repository
 │   ├── health/             # liveness and readiness
 │   ├── menu-items/         # master menu (HQ only)
+│   ├── outlet-menu-items/  # outlet menu assignments and price overrides
 │   ├── outlets/            # outlet management
 │   └── staff/              # staff accounts and outlet memberships
 ├── routes/                 # versioned route composition
@@ -461,11 +462,7 @@ All endpoints are under `/api/v1/menu-items` and require `HQ_ADMIN`. Outlet staf
 
 - **Effective price:** `outlet_menu_items.override_price` when it is not null, otherwise `menu_items.base_price`.
 - **Sellable only when all are active:** the outlet, the outlet assignment (`outlet_menu_items.is_active`) and the master item (`menu_items.is_active`). An inactive master item is never sellable, even if its assignment is active.
-- **Locking inside the sale transaction:**
-  - lock the outlet row `FOR SHARE`;
-  - lock each `outlet_menu_items` row `FOR UPDATE` (stock is decremented);
-  - lock each `menu_items` row `FOR SHARE`, in a consistent order such as by id;
-  - re-check every `is_active`, compute the effective price **from the locked rows**, and copy `name` and price into `sale_items`.
+- **Locking inside the sale transaction:** follow the global lock order in [Outlet menu: locking](#locking-and-the-global-lock-order) (outlet `FOR SHARE`, receipt counter, assignments `FOR UPDATE` by `menu_item_id`, master items `FOR SHARE` by `id`). Then re-check every `is_active`, compute the effective price **from the locked rows**, and copy `name` and price into `sale_items`.
 - **Why:** `FOR SHARE` makes a concurrent deactivation or price edit wait until the sale commits, or makes the sale see the new values. Already-recorded sales keep their snapshot.
 
 **Testing:**
@@ -482,6 +479,117 @@ All endpoints are under `/api/v1/menu-items` and require `HQ_ADMIN`. Outlet staf
 3. Check that `{"basePrice": 180}`, `"1.005"`, `"NaN"` and `"1e2"` each return 400.
 4. `PATCH /menu-items/:id/status {"isActive":false}` twice. `updated_at` changes once. Any `outlet_menu_items` rows for the item keep `is_active`, `stock_quantity` and `override_price`.
 5. Sign in as staff: `GET /menu-items` → 403.
+
+## Outlet Menu API
+
+Endpoints are nested under an outlet: `/api/v1/outlets/:outletId/menu-items`. An assignment is identified by the **pair** `(outletId, menuItemId)`, the table's composite primary key. It is never looked up by `menuItemId` alone.
+
+| Method  | Path                                               | Access                                     | Body                                   |
+| ------- | -------------------------------------------------- | ------------------------------------------ | -------------------------------------- |
+| `GET`   | `/outlets/:outletId/menu-items`                    | HQ admin; staff with access to that outlet | –                                      |
+| `GET`   | `/outlets/:outletId/menu-items/:menuItemId`        | HQ admin; staff with access to that outlet | –                                      |
+| `POST`  | `/outlets/:outletId/menu-items`                    | `HQ_ADMIN`                                 | `{ menuItemId, overridePrice? }`       |
+| `PATCH` | `/outlets/:outletId/menu-items/:menuItemId/price`  | `HQ_ADMIN`                                 | `{ overridePrice }` (string or `null`) |
+| `PATCH` | `/outlets/:outletId/menu-items/:menuItemId/status` | `HQ_ADMIN`                                 | `{ isActive }`                         |
+
+The router is mounted before the outlets router (`mergeParams`), so these paths are authenticated once.
+
+**Response (`OutletMenuItem`):**
+
+- **Identity:** `outletId`, `menuItemId`.
+- **From the master item:** `sku`, `name`, `description`.
+- **Prices (money strings):** `basePrice`, `overridePrice` (nullable), `effectivePrice`.
+- **`priceSource`:** `BASE` or `OVERRIDE`.
+- **`stockQuantity`:** read-only in this phase.
+- **Status flags:** `isActive` (the assignment), `outletIsActive`, `menuItemIsActive`, `isEnabled` and `isSellable`.
+- **Timestamps:** `createdAt`, `updatedAt` (of the assignment).
+
+### Pricing
+
+- `effectivePrice = overridePrice ?? basePrice`, computed with nullish coalescing on `Decimal` values. `"0.00"` is therefore a real override, and only `null` falls back. The effective price is computed per response and never stored.
+- `PATCH …/price {"overridePrice": null}` restores inheritance: later master `basePrice` changes then apply to this outlet automatically. A non-null override applies only to this outlet.
+- Prices use the same money contract as the master menu (`src/common/money.ts`).
+
+### Availability
+
+- `isEnabled = outletIsActive && menuItemIsActive && isActive`.
+- `isSellable = isEnabled && stockQuantity > 0`.
+- **HQ admins** see every assignment of any existing outlet, including inactive outlets. The flags explain why an item is unavailable.
+- **Outlet staff** must pass `requireOutletAccess` (403 for an outlet they don't belong to, or an inactive one). Their queries also carry `outlet.is_active`, `memberships some userId`, `menu_items.is_active` and `outlet_menu_items.is_active` **inside the Prisma `where`**, for both the items and the count.
+  - Enabled items with zero stock are included, so the UI can show "Out of stock".
+  - Disabled or unassigned items return 404 on the detail endpoint and never appear in lists.
+
+### Listing
+
+- Same `page`/`limit` contract as other lists.
+- `search` matches the master SKU or name.
+- `status` filters by assignment status.
+- `sortBy` is `sku`, `name`, `createdAt` or `updatedAt`, with `menuItemId` as the tie-breaker. Sorting by effective price is not offered, because it can't be done in the database before pagination without a computed column.
+
+### Assignment lifecycle
+
+- **Assign:** needs an active outlet and an active master item. The assignment starts with `stockQuantity = 0` and `isActive = true`, and `overridePrice` defaults to `null`. Bodies are strict: stock, status, effective price, `outletId` and timestamps are rejected.
+- **One assignment per outlet and item:** an existing assignment returns 409 on `body.menuItemId`. An inactive one tells the admin to reactivate it instead. A concurrent duplicate insert hits the composite key (P2002 → 409).
+- **Deactivate:** a soft unassignment, always allowed, even under an inactive outlet or master item.
+- **Reactivate:** needs both parents active (409 otherwise), and keeps stock and the override.
+- **Repeated status requests:** no write and no `updatedAt` bump.
+- **Price changes:** allowed on inactive assignments and inactive outlets.
+- **Never touched:** nothing is hard-deleted, stock is never written, the master item is never written, and `sale_items` are never touched.
+- **No automatic assignments:** creating a master item assigns it nowhere.
+
+### Locking and the global lock order
+
+Every transaction that writes these tables takes row locks in this order. It is consistent with the auth and staff paths from earlier phases.
+
+```text
+users  →  outlets  →  receipt_counters  →  outlet_menu_items (by menu_item_id)  →  menu_items (by id)
+```
+
+| Path                                  | Locks taken                                                                                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Login / refresh                       | `users FOR SHARE`                                                                                                                          |
+| Staff status / password reset         | `users FOR UPDATE`, then sessions                                                                                                          |
+| Membership replacement / staff create | `users FOR UPDATE` (replacement), then `outlets FOR SHARE` (by id)                                                                         |
+| Outlet status                         | `UPDATE outlets` (row lock on that outlet only)                                                                                            |
+| Master item status / edit             | `UPDATE menu_items` (row lock on that item only)                                                                                           |
+| **Assign**                            | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE` (if one exists), master item `FOR SHARE`, `INSERT`                    |
+| **Price override**                    | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE`, `UPDATE override_price` only                                         |
+| **Assignment status**                 | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE`, master item `FOR SHARE` (reactivation only), `UPDATE is_active` only |
+
+- **Admin re-check:** each write re-checks, under a shared lock, that the acting user is still an active `HQ_ADMIN`.
+- **Parent checks are atomic:** they happen while the parents are locked `FOR SHARE`, so a concurrent outlet or master-item deactivation (an `UPDATE`) either waits for the assignment to commit or is seen as inactive.
+- **No read-modify-write on stock:** price and status writes update a single column, so they can't overwrite a stock change made by a future inventory or sales transaction. The assignment row lock serializes them with those transactions.
+- **Missing assignment rows:** these can't be locked, so for inserts the composite primary key is the final arbiter.
+- **Deadlocks:** the single global order makes them unlikely, not impossible (for example with lock upgrades or code that strays from the order). PostgreSQL detects them and aborts one transaction, which surfaces as a 500 to retry.
+
+**Future sale transaction (Read Committed), in order:**
+
+1. `users FOR SHARE` for the cashier: re-check `is_active` and membership of the outlet. Membership replacement takes `users FOR UPDATE`, so the two serialize.
+2. `outlets FOR SHARE`: the outlet must be active.
+3. `receipt_counters FOR UPDATE` for that outlet: increment `last_number`.
+4. `outlet_menu_items FOR UPDATE` for every line, ordered by `menu_item_id`: assignment active, stock sufficient, then decrement.
+5. `menu_items FOR SHARE` ordered by `id`: master item active.
+6. Compute `override_price ?? base_price` **from the locked rows** with exact decimals, and insert `sales` and `sale_items` with name and price snapshots.
+
+**Testing:**
+
+- `tests/unit/outlet-menu-items.test.ts` covers HTTP behavior: authorization, staff scoping, cross-outlet isolation, strict bodies, money edge cases, conflict mapping and status rules.
+- `tests/unit/outlet-menu-item-repository.test.ts` covers:
+  - effective price and availability, including the zero override;
+  - the staff `where` clause in both query and count;
+  - the exact lock sequence for every write;
+  - parent-status rules, idempotent status, and that stock and master rows are never written.
+- These use a mocked Prisma client and **do not prove PostgreSQL locking or atomicity**.
+
+### Manual database check (run only with approval; it writes to the shared database)
+
+1. Create (or reuse) an active outlet and an active master item. Then `POST /outlets/:o/menu-items {"menuItemId": "…"}` → 201 with `stockQuantity: 0`, `priceSource: "BASE"`, and `effectivePrice` equal to `basePrice`.
+2. Repeat the request → 409. Send it twice in parallel → one 201 and one 409.
+3. `PATCH …/price {"overridePrice":"0"}` → `effectivePrice: "0.00"`, `priceSource: "OVERRIDE"`. Then `{"overridePrice": null}` → back to `BASE`. Change the master `basePrice`; the assignment's `effectivePrice` follows it.
+4. `PATCH …/status {"isActive":false}` twice. `updated_at` changes once, and `stock_quantity` and `override_price` are unchanged in SQL.
+5. Deactivate the master item, then try `PATCH …/status {"isActive":true}` → 409. Deactivating the assignment still works.
+6. As a staff member of the outlet, `GET /outlets/:o/menu-items` lists only enabled items, zero-stock ones included. Disabled items return 404 on the detail endpoint. Another outlet's menu returns 403.
+7. Lock check: in `psql`, `BEGIN; SELECT * FROM outlets WHERE id = '<o>' FOR UPDATE;`, then call the assign endpoint. It waits until you `ROLLBACK`.
 
 ## Docker (application only)
 

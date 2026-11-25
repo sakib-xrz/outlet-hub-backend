@@ -22,3 +22,36 @@ export async function lockUser(
     ? { id: row.id, role: row.role, isActive: row.is_active, passwordHash: row.password_hash }
     : null;
 }
+
+export async function lockOutletShared(
+  client: DatabaseExecutor,
+  outletId: string,
+): Promise<{ isActive: boolean } | null> {
+  const rows = await client.$queryRaw<{ is_active: boolean }[]>`
+    SELECT is_active FROM outlets WHERE id = ${outletId}::uuid FOR SHARE`;
+  const row = rows[0];
+  return row ? { isActive: row.is_active } : null;
+}
+
+export async function lockOutletMenuItem(
+  client: DatabaseExecutor,
+  outletId: string,
+  menuItemId: string,
+): Promise<{ isActive: boolean } | null> {
+  const rows = await client.$queryRaw<{ is_active: boolean }[]>`
+    SELECT is_active FROM outlet_menu_items
+    WHERE outlet_id = ${outletId}::uuid AND menu_item_id = ${menuItemId}::uuid
+    FOR UPDATE`;
+  const row = rows[0];
+  return row ? { isActive: row.is_active } : null;
+}
+
+export async function lockMenuItemShared(
+  client: DatabaseExecutor,
+  menuItemId: string,
+): Promise<{ isActive: boolean } | null> {
+  const rows = await client.$queryRaw<{ is_active: boolean }[]>`
+    SELECT is_active FROM menu_items WHERE id = ${menuItemId}::uuid FOR SHARE`;
+  const row = rows[0];
+  return row ? { isActive: row.is_active } : null;
+}

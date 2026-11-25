@@ -21,6 +21,10 @@ import { MenuItemController } from '@/modules/menu-items/menu-item.controller.js
 import { MenuItemRepository } from '@/modules/menu-items/menu-item.repository.js';
 import { createMenuItemRouter } from '@/modules/menu-items/menu-item.route.js';
 import { MenuItemService } from '@/modules/menu-items/menu-item.service.js';
+import { OutletMenuItemController } from '@/modules/outlet-menu-items/outlet-menu-item.controller.js';
+import { OutletMenuItemRepository } from '@/modules/outlet-menu-items/outlet-menu-item.repository.js';
+import { createOutletMenuItemRouter } from '@/modules/outlet-menu-items/outlet-menu-item.route.js';
+import { OutletMenuItemService } from '@/modules/outlet-menu-items/outlet-menu-item.service.js';
 import { HealthController } from '@/modules/health/health.controller.js';
 import { createHealthRouter } from '@/modules/health/health.route.js';
 
@@ -38,6 +42,14 @@ export function createApiRouter(database: DatabaseClient, config: AppConfig): Ro
   const outletAccess = new OutletAccessService(new OutletAccessRepository(database));
   const outletController = new OutletController(new OutletService(new OutletRepository(database)));
 
+  const outletMenuController = new OutletMenuItemController(
+    new OutletMenuItemService(new OutletMenuItemRepository(database)),
+  );
+
+  router.use(
+    '/outlets/:outletId/menu-items',
+    createOutletMenuItemRouter(outletMenuController, requireAuth, outletAccess),
+  );
   router.use('/outlets', createOutletRouter(outletController, requireAuth, outletAccess));
   const staffController = new StaffController(new StaffService(new StaffRepository(database)));
   router.use('/staff', createStaffRouter(staffController, requireAuth, config));
