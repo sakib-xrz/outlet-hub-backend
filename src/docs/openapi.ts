@@ -52,12 +52,26 @@ const hqAdminErrors: Record<string, OpenAPIV3.ResponseObject> = {
   '403': errorResponse('HQ_ADMIN role required'),
 };
 
+const menuItemEnvelope = responseEnvelope({
+  type: 'object',
+  required: ['menuItem'],
+  properties: { menuItem: { $ref: '#/components/schemas/MenuItem' } },
+});
+
+const menuItemIdParameter: OpenAPIV3.ParameterObject = {
+  in: 'path',
+  name: 'menuItemId',
+  required: true,
+  schema: { type: 'string', format: 'uuid' },
+};
+
 export const openApiDocument: OpenAPIV3.Document = {
   openapi: '3.0.3',
   info: {
     title: 'OutletHub API',
     version: '1.0.0',
-    description: 'OutletHub authentication, health, outlet management, and staff management API.',
+    description:
+      'OutletHub authentication, health, outlet management, staff management, and master menu API. Monetary amounts are decimal strings with exactly two fraction digits in a single currency.',
   },
   servers: [{ url: '/api/v1' }],
   components: {
@@ -160,6 +174,36 @@ export const openApiDocument: OpenAPIV3.Document = {
             },
           },
         ],
+      },
+      Money: {
+        type: 'string',
+        pattern: '^(0|[1-9]\\d{0,9})(\\.\\d{1,2})?$',
+        description:
+          'Non-negative decimal string, at most 2 fraction digits, max 9999999999.99. Requests may omit trailing zeros ("5", "5.5"); responses always use exactly two ("5.00"). JSON numbers, exponents, signs and NaN/Infinity are rejected.',
+        example: '250.00',
+      },
+      MenuItem: {
+        type: 'object',
+        required: [
+          'id',
+          'sku',
+          'name',
+          'description',
+          'basePrice',
+          'isActive',
+          'createdAt',
+          'updatedAt',
+        ],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          sku: { type: 'string', maxLength: 50, pattern: '^[A-Z0-9]+(?:-[A-Z0-9]+)*$' },
+          name: { type: 'string', maxLength: 150 },
+          description: { type: 'string', maxLength: 1000, nullable: true },
+          basePrice: { $ref: '#/components/schemas/Money' },
+          isActive: { type: 'boolean' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
+        },
       },
       User: {
         type: 'object',
@@ -635,6 +679,162 @@ export const openApiDocument: OpenAPIV3.Document = {
           },
           '404': errorResponse('Not found or not an OUTLET_STAFF account'),
           '429': errorResponse('Too many password resets'),
+          ...hqAdminErrors,
+        },
+      },
+    },
+    '/menu-items': {
+      get: {
+        tags: ['Master menu'],
+        summary: 'List master menu items (HQ_ADMIN)',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { in: 'query', name: 'page', schema: { type: 'integer', minimum: 1, default: 1 } },
+          {
+            in: 'query',
+            name: 'limit',
+            schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+          },
+          {
+            in: 'query',
+            name: 'search',
+            description: 'Case-insensitive match on SKU or name',
+            schema: { type: 'string', maxLength: 100 },
+          },
+          {
+            in: 'query',
+            name: 'status',
+            schema: { type: 'string', enum: ['all', 'active', 'inactive'], default: 'all' },
+          },
+          {
+            in: 'query',
+            name: 'sortBy',
+            schema: {
+              type: 'string',
+              enum: ['sku', 'name', 'basePrice', 'createdAt', 'updatedAt'],
+              default: 'createdAt',
+            },
+          },
+          {
+            in: 'query',
+            name: 'sortOrder',
+            schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
+          },
+        ],
+        responses: {
+          '200': {
+            description: 'Menu items page',
+            content: {
+              'application/json': responseEnvelope({
+                type: 'object',
+                required: ['items', 'pagination'],
+                properties: {
+                  items: { type: 'array', items: { $ref: '#/components/schemas/MenuItem' } },
+                  pagination: { $ref: '#/components/schemas/Pagination' },
+                },
+              }),
+            },
+          },
+          ...hqAdminErrors,
+        },
+      },
+      post: {
+        tags: ['Master menu'],
+        summary: 'Create a master menu item (HQ_ADMIN)',
+        description:
+          'SKU is trimmed and uppercased and cannot be changed later. Items start active and are not assigned to any outlet.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['sku', 'name', 'basePrice'],
+                properties: {
+                  sku: { type: 'string', minLength: 1, maxLength: 50, example: 'COFFEE-001' },
+                  name: { type: 'string', minLength: 1, maxLength: 150, example: 'Cappuccino' },
+                  description: { type: 'string', maxLength: 1000, nullable: true },
+                  basePrice: { $ref: '#/components/schemas/Money' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': { description: 'Created', content: { 'application/json': menuItemEnvelope } },
+          '409': errorResponse('SKU already exists (field body.sku)', 'ValidationError'),
+          ...hqAdminErrors,
+        },
+      },
+    },
+    '/menu-items/{menuItemId}': {
+      parameters: [menuItemIdParameter],
+      get: {
+        tags: ['Master menu'],
+        summary: 'Get a master menu item (HQ_ADMIN)',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': { description: 'Menu item', content: { 'application/json': menuItemEnvelope } },
+          '404': errorResponse('Menu item not found'),
+          ...hqAdminErrors,
+        },
+      },
+      patch: {
+        tags: ['Master menu'],
+        summary: 'Update name, description or base price (HQ_ADMIN)',
+        description:
+          'Partial update. SKU and status cannot be changed here. Outlet price overrides and historical sale prices are not affected.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                minProperties: 1,
+                properties: {
+                  name: { type: 'string', minLength: 1, maxLength: 150 },
+                  description: { type: 'string', maxLength: 1000, nullable: true },
+                  basePrice: { $ref: '#/components/schemas/Money' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Updated', content: { 'application/json': menuItemEnvelope } },
+          '404': errorResponse('Menu item not found'),
+          ...hqAdminErrors,
+        },
+      },
+    },
+    '/menu-items/{menuItemId}/status': {
+      parameters: [menuItemIdParameter],
+      patch: {
+        tags: ['Master menu'],
+        summary: 'Activate or deactivate a master menu item (HQ_ADMIN)',
+        description:
+          'Idempotent conditional update. Inactive items must not be sold even if an outlet assignment is active. Outlet assignments, stock, price overrides and sales are preserved.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['isActive'],
+                properties: { isActive: { type: 'boolean' } },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Status set', content: { 'application/json': menuItemEnvelope } },
+          '404': errorResponse('Menu item not found'),
           ...hqAdminErrors,
         },
       },

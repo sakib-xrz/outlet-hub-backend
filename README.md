@@ -1,6 +1,6 @@
 # OutletHub Backend
 
-Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, **Outlet Management** (phase 1) and **Staff & Outlet Membership Management** (phase 2). Menu, inventory, sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
+Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, **Outlet Management** (phase 1), **Staff & Outlet Membership Management** (phase 2) and **Master Menu Management** (phase 3). Outlet menu assignment, inventory, sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
 
 ## Stack
 
@@ -29,6 +29,7 @@ src/
 │   ├── access/             # outlet-access checks (membership, HQ scope)
 │   ├── auth/               # routes → controller → service → repository
 │   ├── health/             # liveness and readiness
+│   ├── menu-items/         # master menu (HQ only)
 │   ├── outlets/            # outlet management
 │   └── staff/              # staff accounts and outlet memberships
 ├── routes/                 # versioned route composition
@@ -147,6 +148,7 @@ The schema is managed only through committed SQL migrations in `prisma/migration
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `20261125000000_initial_auth`    | Users and refresh sessions                                                                                                  |
 | `20261125100000_business_domain` | Outlets, memberships, menu items, outlet stock/pricing, receipt counters, sales, sale items, and database CHECK constraints |
+| `20261126000000_money_not_nan`   | **Pending, not applied.** Additive `<> 'NaN'` checks on every money column                                                  |
 
 The CHECK constraints are added in SQL because Prisma cannot express them:
 
@@ -407,6 +409,79 @@ Login and refresh now take the same user-row lock that account changes take, so 
 5. `PATCH /staff/:id/password`, then confirm the old password fails, the new one works, and all sessions created before the reset are revoked.
 6. `PUT /staff/:id/outlets` with a set that keeps one outlet, drops one and adds one. The kept row's `created_at` is unchanged.
 7. Race check: start a login with the old password and a password reset at the same moment (two terminals). Afterwards, no unrevoked session may exist with a `created_at` earlier than the reset.
+
+## Master Menu API
+
+All endpoints are under `/api/v1/menu-items` and require `HQ_ADMIN`. Outlet staff get 403; they will read outlet-specific assigned items from a phase 4 endpoint, never the global catalog.
+
+| Method  | Path                             | Body                                      | Result                                   |
+| ------- | -------------------------------- | ----------------------------------------- | ---------------------------------------- |
+| `GET`   | `/menu-items`                    | –                                         | `{ items, pagination }`                  |
+| `GET`   | `/menu-items/:menuItemId`        | –                                         | `{ menuItem }` (inactive items included) |
+| `POST`  | `/menu-items`                    | `{ sku, name, description?, basePrice }`  | `201 { menuItem }`; `409` on `body.sku`  |
+| `PATCH` | `/menu-items/:menuItemId`        | any of `{ name, description, basePrice }` | `{ menuItem }`                           |
+| `PATCH` | `/menu-items/:menuItemId/status` | `{ isActive }`                            | `{ menuItem }`                           |
+
+**Fields:** `id`, `sku`, `name`, `description` (nullable), `basePrice` (a money string), `isActive`, `createdAt`, `updatedAt`. Assignments, stock and sales are not returned in this phase.
+
+**Listing:**
+
+- Same `page`/`limit`/`status` contract as outlets.
+- `search` matches SKU or name, case-insensitively.
+- `sortBy` is `sku`, `name`, `basePrice`, `createdAt` or `updatedAt`, with `id` as the tie-breaker.
+- Everything is applied in the database query.
+
+**Rules:**
+
+- **SKU:** trimmed and uppercased; 1–50 characters of letters, digits and single hyphens. It is **immutable**, because no update endpoint accepts it. Uniqueness comes from the database index, so concurrent duplicates give one 201 and one 409.
+- **Name:** 1–150 characters after trimming. An empty description becomes `null`.
+- **New items:** always created active, and never assigned to outlets automatically.
+- **Strict bodies:** `sku` (on update), `isActive`, ids and timestamps are rejected.
+- **Price changes:** `PATCH` writes only `menu_items` columns. Outlet `override_price`, stock, and the `unit_price`/`item_name` snapshots on `sale_items` are separate rows and are never touched.
+- **Status changes:** a conditional `UPDATE … WHERE id = $1 AND is_active <> $2`. Repeating the current status changes nothing (not even `updatedAt`), and two concurrent toggles can't interleave. Assignments, stock, overrides and sales are preserved. There is no hard delete.
+
+### Money contract
+
+- **Format:** money is a JSON **string** matching `^(0|[1-9]\d{0,9})(\.\d{1,2})?$`, so 0 to `9999999999.99` (the `DECIMAL(12,2)` range).
+- **Rejected:** JSON numbers, negative values, `NaN`, `Infinity`, exponents, leading zeros or `+`, more than 2 decimals (never rounded silently), and values out of range.
+- **Normalization:** input is padded to two decimals as a string (`"5"` becomes `"5.00"`).
+- **Storage:** the string is handed to Prisma's `Decimal` column as-is. Responses use `Decimal#toFixed(2)`.
+- **No floats:** neither `Number` nor `parseFloat` is ever used.
+- **Shared helper:** `src/common/money.ts` (`moneySchema`, `serializeMoney`) is intended for outlet price overrides and sales.
+- **Currency:** a single currency, with no currency column. The frontend displays it as BDT (`৳`).
+
+**NaN gap and the pending migration:**
+
+- PostgreSQL `numeric` accepts `'NaN'` and sorts it above every number, so the existing `CHECK (base_price >= 0)` style constraints **accept NaN**. (`Infinity` is already rejected, because these columns declare a precision.)
+- The API never writes NaN. As defence in depth, `20261126000000_money_not_nan` adds `<> 'NaN'::numeric` checks to `menu_items.base_price`, `outlet_menu_items.override_price`, `sales.total_amount`, `sale_items.unit_price` and `sale_items.line_total`.
+- It is **not applied**. Apply it with approval via `pnpm db:migrate:status`, then `pnpm db:migrate:deploy`.
+- It fails if a NaN value already exists. Check first with `SELECT count(*) FROM menu_items WHERE base_price = 'NaN'` (and similarly for the other columns).
+
+### Rules for future outlet pricing and sales
+
+- **Effective price:** `outlet_menu_items.override_price` when it is not null, otherwise `menu_items.base_price`.
+- **Sellable only when all are active:** the outlet, the outlet assignment (`outlet_menu_items.is_active`) and the master item (`menu_items.is_active`). An inactive master item is never sellable, even if its assignment is active.
+- **Locking inside the sale transaction:**
+  - lock the outlet row `FOR SHARE`;
+  - lock each `outlet_menu_items` row `FOR UPDATE` (stock is decremented);
+  - lock each `menu_items` row `FOR SHARE`, in a consistent order such as by id;
+  - re-check every `is_active`, compute the effective price **from the locked rows**, and copy `name` and price into `sale_items`.
+- **Why:** `FOR SHARE` makes a concurrent deactivation or price edit wait until the sale commits, or makes the sale see the new values. Already-recorded sales keep their snapshot.
+
+**Testing:**
+
+- `tests/unit/menu-items.test.ts` covers HTTP, validation and authorization.
+- `tests/unit/money.test.ts` covers precision cases.
+- `tests/unit/menu-item-repository.test.ts` covers query shape, exact-string persistence, scalar-only updates and the conditional status update.
+- These run against a mocked Prisma client and do not prove PostgreSQL behavior.
+
+### Manual database check (run only with approval; it writes to the shared database)
+
+1. `POST /menu-items {"sku":" coffee-001 ","name":"Cappuccino","basePrice":"180.5"}` → 201 with `sku: "COFFEE-001"` and `basePrice: "180.50"`. In SQL, `base_price` is `180.50`.
+2. Send the same request twice in parallel: one 201 and one 409 on `body.sku`.
+3. Check that `{"basePrice": 180}`, `"1.005"`, `"NaN"` and `"1e2"` each return 400.
+4. `PATCH /menu-items/:id/status {"isActive":false}` twice. `updated_at` changes once. Any `outlet_menu_items` rows for the item keep `is_active`, `stock_quantity` and `override_price`.
+5. Sign in as staff: `GET /menu-items` → 403.
 
 ## Docker (application only)
 

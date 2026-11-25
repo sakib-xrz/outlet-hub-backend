@@ -17,6 +17,10 @@ import { StaffController } from '@/modules/staff/staff.controller.js';
 import { StaffRepository } from '@/modules/staff/staff.repository.js';
 import { createStaffRouter } from '@/modules/staff/staff.route.js';
 import { StaffService } from '@/modules/staff/staff.service.js';
+import { MenuItemController } from '@/modules/menu-items/menu-item.controller.js';
+import { MenuItemRepository } from '@/modules/menu-items/menu-item.repository.js';
+import { createMenuItemRouter } from '@/modules/menu-items/menu-item.route.js';
+import { MenuItemService } from '@/modules/menu-items/menu-item.service.js';
 import { HealthController } from '@/modules/health/health.controller.js';
 import { createHealthRouter } from '@/modules/health/health.route.js';
 
@@ -37,6 +41,10 @@ export function createApiRouter(database: DatabaseClient, config: AppConfig): Ro
   router.use('/outlets', createOutletRouter(outletController, requireAuth, outletAccess));
   const staffController = new StaffController(new StaffService(new StaffRepository(database)));
   router.use('/staff', createStaffRouter(staffController, requireAuth, config));
+  const menuItemController = new MenuItemController(
+    new MenuItemService(new MenuItemRepository(database)),
+  );
+  router.use('/menu-items', createMenuItemRouter(menuItemController, requireAuth));
   router.use('/health', createHealthRouter(new HealthController(database, config)));
   return router;
 }
