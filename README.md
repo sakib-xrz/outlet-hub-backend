@@ -140,6 +140,23 @@ Use an absolute `sslrootcert` path. node-postgres treats `sslmode=require` as `v
 
 The schema is managed only through committed SQL migrations in `prisma/migrations/`. Nothing runs migrations or seeds automatically: not app startup, not the Docker build, not tests.
 
+| Migration                        | Contents                                                                                                                    |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `20261125000000_initial_auth`    | Users and refresh sessions                                                                                                  |
+| `20261125100000_business_domain` | Outlets, memberships, menu items, outlet stock/pricing, receipt counters, sales, sale items, and database CHECK constraints |
+
+The CHECK constraints are added in SQL because Prisma cannot express them:
+
+- stock is never negative;
+- sale quantities are positive;
+- base, override and unit prices and sale totals are non-negative;
+- `line_total = unit_price × quantity`;
+- receipt numbers are positive and counters non-negative;
+- `request_hash` is a SHA-256 hex string;
+- codes, SKUs and names are not blank.
+
+Checks that span rows, such as a sale total equalling the sum of its lines, belong in the sale service's transaction.
+
 1. Edit `prisma/schema.prisma`.
 2. Generate SQL without writing to the database. `migrate diff` is read-only:
 
@@ -183,7 +200,14 @@ Login responses include `{ accessToken, tokenType, expiresIn, user }`. Store the
 
 Access tokens enforce the explicit HS256 algorithm, issuer, audience, expiry, and role claims. Refresh tokens contain 256 bits of randomness; only SHA-256 hashes are persisted. Every use rotates the token in a serializable transaction. Reuse of a rotated token revokes all still-active sessions in that token family, including the result of a concurrent refresh. Logout is idempotent. Authentication errors remain generic to limit account enumeration.
 
-Initial roles are `HQ_ADMIN` and `OUTLET_STAFF`. Route-level role middleware exists, but outlet-level authorization is deliberately deferred until an outlet domain and membership model exist.
+Roles are `HQ_ADMIN` and `OUTLET_STAFF`.
+
+- `authenticate` verifies the JWT, then loads the user from the database on every request. A deactivated user is rejected immediately, and the role always comes from the database, never from a possibly stale token claim.
+- `authorize(...roles)` restricts routes by role.
+- `requireOutletAccess(access, 'outletId')` validates the outlet id in the route and calls `OutletAccessService.assertCanAccessOutlet`:
+  - HQ admins may access any existing outlet. A missing outlet returns 404.
+  - Outlet staff need a membership in an **active** outlet; otherwise they get 403, which does not reveal whether the outlet exists.
+- Business services should repeat this check with their transaction client (`assertCanAccessOutlet(user, outletId, tx)`), so access is checked atomically with the write.
 
 Success responses follow:
 

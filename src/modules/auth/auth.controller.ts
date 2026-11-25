@@ -32,10 +32,9 @@ export class AuthController {
     response.json(success({}, 'Logout successful'));
   };
 
-  public me = async (request: Request, response: Response): Promise<void> => {
+  public me = (request: Request, response: Response): void => {
     if (!request.user) throw new AuthenticationError();
-    const user = await this.service.getCurrentUser(request.user.id);
-    response.json(success({ user }));
+    response.json(success({ user: request.user }));
   };
 
   private context(request: Request): { ipAddress: string; userAgent?: string } {

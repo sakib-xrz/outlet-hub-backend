@@ -6,15 +6,21 @@ import { AuthRepository } from '@/modules/auth/auth.repository.js';
 import { createAuthRouter } from '@/modules/auth/auth.route.js';
 import { AuthService } from '@/modules/auth/auth.service.js';
 import { TokenService } from '@/modules/auth/token.service.js';
+import { authenticate } from '@/middlewares/authenticate.js';
 import { HealthController } from '@/modules/health/health.controller.js';
 import { createHealthRouter } from '@/modules/health/health.route.js';
 
 export function createApiRouter(database: DatabaseClient, config: AppConfig): Router {
   const router = Router();
   const tokens = new TokenService(config);
-  const authService = new AuthService(new AuthRepository(database), tokens, config);
+  const authRepository = new AuthRepository(database);
+  const authService = new AuthService(authRepository, tokens, config);
+  const requireAuth = authenticate(tokens, authRepository);
 
-  router.use('/auth', createAuthRouter(new AuthController(authService, config), tokens, config));
+  router.use(
+    '/auth',
+    createAuthRouter(new AuthController(authService, config), requireAuth, config),
+  );
   router.use('/health', createHealthRouter(new HealthController(database, config)));
   return router;
 }

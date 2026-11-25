@@ -1,16 +1,14 @@
-import { Router } from 'express';
+import { type RequestHandler, Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import type { AppConfig } from '@/config/env.js';
 import type { AuthController } from '@/modules/auth/auth.controller.js';
-import type { TokenService } from '@/modules/auth/token.service.js';
 import { loginSchema } from '@/modules/auth/auth.validation.js';
-import { authenticate } from '@/middlewares/authenticate.js';
 import { requireTrustedOrigin } from '@/middlewares/trusted-origin.js';
 import { validate } from '@/middlewares/validate.js';
 
 export function createAuthRouter(
   controller: AuthController,
-  tokens: TokenService,
+  requireAuth: RequestHandler,
   config: AppConfig,
 ): Router {
   const router = Router();
@@ -40,6 +38,6 @@ export function createAuthRouter(
   );
   router.post('/refresh', trustedOrigin, authLimiter, controller.refresh);
   router.post('/logout', trustedOrigin, controller.logout);
-  router.get('/me', authenticate(tokens), controller.me);
+  router.get('/me', requireAuth, controller.me);
   return router;
 }

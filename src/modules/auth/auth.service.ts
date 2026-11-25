@@ -50,12 +50,6 @@ export class AuthService {
       await this.repository.revokeSession(this.tokens.hashRefreshToken(refreshToken));
   }
 
-  public async getCurrentUser(id: string): Promise<PublicUser> {
-    const user = await this.repository.findActiveUserById(id);
-    if (!user) throw new AuthenticationError();
-    return user;
-  }
-
   private async issueNewSession(user: PublicUser, context: SessionContext): Promise<TokenPair> {
     const refreshToken = this.tokens.createRefreshToken();
     await this.repository.createSession({
