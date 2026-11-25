@@ -832,27 +832,38 @@ The `by-request` route is registered before `/:saleId`.
 
 ### Concurrency verification (real PostgreSQL)
 
-`scripts/verify-sales-concurrency.ts` runs the real services and repositories against a **disposable** PostgreSQL. It refuses to start unless `SALES_VERIFICATION_DATABASE_URL` and `CONFIRM_DISPOSABLE_DATABASE=yes` are set, and that URL differs from the configured `DATABASE_URL`.
+`scripts/verify-sales-concurrency.ts` runs the real services and repositories against a **disposable, local** PostgreSQL. The shared guard in `scripts/support/disposable-database.ts` refuses to start unless:
+
+- `SALES_VERIFICATION_DATABASE_URL` is set and `CONFIRM_DISPOSABLE_DATABASE=yes`;
+- the host is `localhost`, `127.0.0.1` or `::1` (remote and shared databases are always refused);
+- the database name contains `test`, `verify`, `verification`, `disposable` or `scratch`;
+- host aliases, port and database name do not resolve to the configured `DATABASE_URL`;
+- after connecting, `current_database()` matches and the database contains no users or outlets that the scripts did not create (fixture users use `@example.invalid`, fixture outlets `VERIFY-`).
 
 ```bash
-# 1. Start a throwaway PostgreSQL 18 (any host). Never point this at the shared database.
+# 1. Start a throwaway local PostgreSQL 18. Never point this at the shared database.
+docker run --rm -d --name outlethub-verify -e POSTGRES_PASSWORD=verify -p 55432:5432 postgres:18
+export VERIFY_URL=postgresql://postgres:verify@localhost:55432/outlethub_verify
+createdb -h localhost -p 55432 -U postgres outlethub_verify
 # 2. Apply migrations to it:
-DATABASE_URL=<disposable-url> pnpm db:migrate:deploy
+DATABASE_URL=$VERIFY_URL pnpm db:migrate:deploy
 # 3. Run the scenarios:
-SALES_VERIFICATION_DATABASE_URL=<disposable-url> CONFIRM_DISPOSABLE_DATABASE=yes pnpm verify:sales-concurrency
+SALES_VERIFICATION_DATABASE_URL=$VERIFY_URL CONFIRM_DISPOSABLE_DATABASE=yes pnpm verify:sales-concurrency
 ```
 
-| Scenario                       | Setup                                                         | Expected                                                                      |
-| ------------------------------ | ------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| A. Overselling                 | stock 10, two concurrent sales of 7                           | one OK and one `INSUFFICIENT_STOCK`; stock 3; counter +1; 1 sale              |
-| B. Concurrent valid sales      | stock 20, ten concurrent sales of 1                           | all OK; stock 10; receipts 1..10, consecutive                                 |
-| C. Concurrent idempotency      | same request id × 10                                          | one sale; stock and counter changed once; every response has the same sale id |
-| D. Multi-item atomicity        | one line short of stock                                       | nothing changes (stock, counter, sales, lines)                                |
-| E. Independent outlets         | 5 + 5 concurrent sales in two outlets                         | each counter is 5; stock changes stay per outlet                              |
-| F. Sale vs. stock adjustment   | sell 4 while an admin adds 5, from 10                         | 11 (no lost update)                                                           |
-| G. Sale vs. price change       | sell while the base price changes and the override is cleared | either committed at the old price or `PRICE_CHANGED` with stock untouched     |
-| H. Sale vs. membership removal | sell while the cashier's memberships are replaced with `[]`   | either committed before, or `AUTHORIZATION_ERROR`; membership gone            |
-| I. Injected failure            | deduct stock and increment the counter, then throw            | stock and counter unchanged                                                   |
+| Scenario                       | Setup                                                                    | Expected                                                                                      |
+| ------------------------------ | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| A. Overselling                 | stock 10, two concurrent sales of 7                                      | one OK and one `INSUFFICIENT_STOCK`; stock 3; counter +1; 1 sale                              |
+| B. Concurrent valid sales      | stock 20, ten concurrent sales of 1                                      | all OK; stock 10; receipts 1..10, consecutive                                                 |
+| C. Concurrent idempotency      | same request id × 10                                                     | all ten succeed; exactly 1 created and 9 replays; one sale id; stock and counter changed once |
+| D. Multi-item atomicity        | one line short of stock                                                  | nothing changes (stock, counter, sales, lines)                                                |
+| E. Independent outlets         | 5 + 5 concurrent sales in two outlets                                    | each counter is 5; stock changes stay per outlet                                              |
+| F. Sale vs. stock adjustment   | sell 4 while an admin adds 5, from 10                                    | 11 (no lost update)                                                                           |
+| G. Sale vs. price change       | sell while the base price changes and the override is cleared            | either committed at the old price or `PRICE_CHANGED` with stock untouched                     |
+| H. Sale vs. membership removal | sell while the cashier's memberships are replaced with `[]`              | either committed before, or `AUTHORIZATION_ERROR`; membership gone                            |
+| I. Injected failure            | real `SaleRepository`; the client proxy makes `saleItem.createMany` fail | stock, counter, `Sale` and `SaleItem` rows unchanged (no production flag)                     |
+
+Scenario I wraps the Prisma client in a script-local `Proxy` whose interactive transaction rejects `saleItem.createMany`, so the unmodified production `SaleRepository` deducts stock, increments the counter and inserts the `Sale` before failing. There is no failure-injection flag in application code.
 
 The script prints PASS or FAIL per check and exits non-zero on any failure. **It has not been run**, because no disposable PostgreSQL was available and the shared database must not be used. The unit tests (`sale-calculation`, `sales`, `sale-repository`) use mocks: they prove the orchestration (lock order, writes only after validation, no writes on replay or refusal, errors propagating from every write step), **not** PostgreSQL's locking or atomicity.
 
@@ -861,6 +872,90 @@ The script prints PASS or FAIL per check and exits non-zero on any failure. **It
 - **Same lock order as planned:** user → outlet → receipt counter → assignments → master items, as in the ERD and flowchart and the earlier "future sale" notes.
 - **Idempotency lookup placement:** runs _after_ the counter lock rather than before the transaction. This serializes duplicate submissions of the same request id, so they cannot both pass the lookup.
 - **No structural schema changes.**
+
+## Reports API (HQ_ADMIN only)
+
+All endpoints require `HQ_ADMIN`. `OUTLET_STAFF` gets `403` and anonymous requests get `401`.
+
+| Method | Path                                                  | Purpose                                              |
+| ------ | ----------------------------------------------------- | ---------------------------------------------------- |
+| GET    | `/api/v1/reports/summary`                             | Company revenue, sale count, units and outlet counts |
+| GET    | `/api/v1/reports/revenue-by-outlet`                   | Paginated revenue per outlet                         |
+| GET    | `/api/v1/reports/outlets/:outletId/top-selling-items` | Top 5 items of one outlet by quantity                |
+
+### Date range
+
+- `from` and `to` are optional ISO 8601 timestamps **with an offset** (`Z` or `+06:00`). Send both or neither. Neither means all sales.
+- The range is half-open: `created_at >= from AND created_at < to`. Clients send the next local midnight as `to`, never `23:59:59`.
+- Rejected with `400`: one bound only, an invalid timestamp or one without an offset, `to <= from`, or a span longer than 366 days. Unknown query parameters are also rejected.
+- Outlet counts (`totalOutlets`, `activeOutlets`) and outlet `isActive` are **current** values, not historical.
+
+### Responses
+
+```json
+// GET /reports/summary
+{ "totalRevenue": "148500.00", "totalSales": "594", "totalUnitsSold": "1248", "totalOutlets": 5, "activeOutlets": 4 }
+
+// GET /reports/revenue-by-outlet?page=1&limit=20
+{ "items": [{ "outletId": "…", "outletCode": "MIRPUR-01", "outletName": "Mirpur", "isActive": true,
+              "totalRevenue": "80500.00", "totalSales": "312" }],
+  "pagination": { "page": 1, "limit": 20, "total": 5, "totalPages": 1 } }
+
+// GET /reports/outlets/:outletId/top-selling-items
+{ "outlet": { "id": "…", "code": "MIRPUR-01", "name": "Mirpur", "isActive": true },
+  "items": [{ "rank": 1, "menuItemId": "…", "sku": "BURGER-001", "name": "Classic Burger",
+              "quantitySold": "420", "totalRevenue": "105000.00" }] }
+```
+
+- **Revenue by outlet** lists every outlet, including inactive ones and outlets without sales (`"0.00"`, `"0"`). `search` (≤ 100 characters) matches the code or name with `ILIKE`, escaping `%`, `_` and `\`. `sortBy` is `totalRevenue` (default), `totalSales` or `code`, and `sortOrder` defaults to `desc`. `o.id ASC` always breaks ties. Sorting happens in PostgreSQL on the numeric values.
+- **Top-selling items** returns `404` for an unknown outlet and allows inactive outlets. Items are grouped by `menu_item_id`, ordered by `SUM(quantity) DESC, menu_item_id ASC`, and limited to 5. Revenue is `SUM(line_total)`, so the same item sold at different prices is exact. The `sku` and `name` labels come from the **current** master item, while `sale_items.item_name` keeps the historical receipt text.
+
+### Money and counts
+
+- Aggregation stays in PostgreSQL `NUMERIC` (`SUM(total_amount)`, `SUM(line_total)`) and is returned as text. It is **not** cast back to `DECIMAL(16,2)`, so company-wide totals have no upper bound.
+- `serializeAggregateMoney` normalizes to exactly two decimals (`"12.5"` → `"12.50"`). `AggregateMoney` in OpenAPI has no maximum. Any other text, such as `NaN`, a negative or a third decimal, throws. The client gets a generic `500`, never a wrong figure. (The pending `money_not_nan` migration will block NaN at write time; it is still **not applied**.)
+- Sale counts and unit totals are integer strings (`^\d+$`), safe beyond 2^53. Outlet counts are JSON integers.
+- The currency is BDT.
+
+### Query strategy
+
+| Endpoint          | Queries (one snapshot)                                                                                                                                                      |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Summary           | ① `SUM(total_amount), COUNT(*)` on `sales`; ② `SUM(quantity)` on `sale_items JOIN sales ON (id, outlet_id)`; ③ `COUNT(*)`, `COUNT(*) FILTER (WHERE is_active)` on `outlets` |
+| Revenue by outlet | `outlets LEFT JOIN (SELECT outlet_id, SUM, COUNT FROM sales WHERE <range> GROUP BY outlet_id)` + `COALESCE`, `ORDER BY … , o.id LIMIT/OFFSET`; plus a count                 |
+| Top-selling items | outlet lookup; `sale_items JOIN sales ON (sale_id, outlet_id) JOIN menu_items … GROUP BY menu_item_id ORDER BY SUM(quantity) DESC, menu_item_id LIMIT 5`                    |
+
+- **No join multiplication.** Revenue and sale count come from `sales` alone. Units come from a separate `sale_items` aggregate. The date filter sits _inside_ the outlet subquery, so the `LEFT JOIN` keeps zero-sale outlets.
+- **Parameterized raw SQL.** Queries use Prisma tagged templates. Every value, including dates, outlet id, search, limit and offset, is a bind parameter. `Prisma.raw` appears only for allowlisted constant `ORDER BY` fragments and column names. There is no `SELECT *` and no N+1.
+- **Consistent snapshot, no locks.** Each endpoint's queries run as one batched transaction at `REPEATABLE READ`, so all figures come from the same MVCC snapshot. Reads never block POS writers, and no `FOR UPDATE`/`FOR SHARE` is taken.
+- **Indexes used:** `sales(outlet_id, created_at)` for per-outlet ranges and grouping, the `sales` primary key and `(id, outlet_id)` unique for the `sale_items` join, `sale_items(outlet_id, menu_item_id)` for top-selling, and the `sale_items` primary key `(sale_id, menu_item_id)`. A company-wide range filter without an outlet scans `sales`. If data volume grows, a `sales(created_at)` index is the next candidate. It is **not** added now.
+- `EXPLAIN ANALYZE` was **not** run against the shared database. Run it only on a disposable copy.
+
+### Reporting verification (real PostgreSQL)
+
+`scripts/verify-reports.ts` uses the same disposable-database guard as the concurrency script, with `REPORTS_VERIFICATION_DATABASE_URL`. It creates its own fixtures in March 2099:
+
+- three outlets: one with several multi-item sales, one **inactive** with a sale, and one with **no sales**;
+- seven items, more than five, with three-way and two-way **quantity ties**;
+- the **same item at two prices** (`10.00` and `12.50`);
+- an item **renamed** after it was sold;
+- sales exactly at `from` (included), exactly at `to` (excluded) and 1 ms before `from` (excluded).
+
+It then checks the report outputs:
+
+- window totals: `339.00`, `4` sales and `26` units;
+- current outlet counts;
+- the all-time delta of `489.00` over `6` sales;
+- zeros for an empty range;
+- revenue-by-outlet order, statuses, zero rows, sorting and pagination;
+- top-5 ranks with id tie-breaks, exact line-total sums and current labels;
+- the inactive outlet, the no-sales outlet and an unknown outlet.
+
+```bash
+REPORTS_VERIFICATION_DATABASE_URL=$VERIFY_URL CONFIRM_DISPOSABLE_DATABASE=yes pnpm verify:reports
+```
+
+**It has not been run.** No disposable local PostgreSQL was available, and the shared database must not be used. The unit tests (`reports`, `report-repository`, `disposable-database`) are mocked. They prove validation, authorization, SQL shape (joins, half-open filter, tie-breaks, parameter binding), serialization and the guard's refusals, but **not** PostgreSQL's results.
 
 ## Docker (application only)
 
@@ -927,6 +1022,8 @@ Compose has no database service. It reads `.env.production` at runtime and publi
 | `pnpm db:migrate:status`            | Read-only: show applied/pending migrations                     |
 | `pnpm db:migrate:deploy`            | Apply committed migrations (**writes to the shared database**) |
 | `pnpm db:seed:admin`                | Explicitly seed/rotate the HQ admin (**writes**)               |
+| `pnpm verify:sales-concurrency`     | Concurrency scenarios on a **local disposable** database only  |
+| `pnpm verify:reports`               | Report fixtures and checks on a **local disposable** database  |
 
 There is no external CI. Coolify builds from Git. Husky runs lint-staged on commit and enforces Conventional Commits. Run `pnpm verify && pnpm security:audit` before pushing.
 

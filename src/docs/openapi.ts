@@ -1,6 +1,8 @@
 import type { OpenAPIV3 } from 'openapi-types';
 
-const responseEnvelope = (schema: OpenAPIV3.SchemaObject): OpenAPIV3.MediaTypeObject => ({
+const responseEnvelope = (
+  schema: OpenAPIV3.SchemaObject | OpenAPIV3.ReferenceObject,
+): OpenAPIV3.MediaTypeObject => ({
   schema: {
     type: 'object',
     required: ['success', 'message', 'data'],
@@ -50,6 +52,30 @@ const hqAdminErrors: Record<string, OpenAPIV3.ResponseObject> = {
   '400': errorResponse('Invalid request', 'ValidationError'),
   '401': errorResponse('Authentication required'),
   '403': errorResponse('HQ_ADMIN role required'),
+};
+
+const reportRangeParameters: OpenAPIV3.ParameterObject[] = [
+  {
+    in: 'query',
+    name: 'from',
+    schema: { type: 'string', format: 'date-time' },
+    description:
+      'Inclusive start (ISO 8601 with offset). Send with `to`, or omit both for all sales.',
+  },
+  {
+    in: 'query',
+    name: 'to',
+    schema: { type: 'string', format: 'date-time' },
+    description: 'Exclusive end (ISO 8601 with offset). Must be after `from`; at most 366 days.',
+  },
+];
+
+const reportErrors: Record<string, OpenAPIV3.ResponseObject> = {
+  ...hqAdminErrors,
+  '400': errorResponse(
+    'Invalid date range (missing pair, invalid timestamp, to <= from, longer than 366 days)',
+    'ValidationError',
+  ),
 };
 
 const menuItemEnvelope = responseEnvelope({
@@ -299,6 +325,61 @@ export const openApiDocument: OpenAPIV3.Document = {
           isEnabled: { type: 'boolean' },
           isSellable: { type: 'boolean' },
           updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      AggregateMoney: {
+        type: 'string',
+        pattern: '^\\d+\\.\\d{2}$',
+        description:
+          'Exact PostgreSQL NUMERIC aggregate in BDT, always two decimals, no upper bound',
+        example: '148500.00',
+      },
+      IntegerString: {
+        type: 'string',
+        pattern: '^\\d+$',
+        description: 'Non-negative integer as a string (safe beyond 2^53)',
+        example: '594',
+      },
+      BusinessSummary: {
+        type: 'object',
+        required: ['totalRevenue', 'totalSales', 'totalUnitsSold', 'totalOutlets', 'activeOutlets'],
+        properties: {
+          totalRevenue: { $ref: '#/components/schemas/AggregateMoney' },
+          totalSales: { $ref: '#/components/schemas/IntegerString' },
+          totalUnitsSold: { $ref: '#/components/schemas/IntegerString' },
+          totalOutlets: { type: 'integer', description: 'Current count, not historical' },
+          activeOutlets: { type: 'integer', description: 'Currently active outlets' },
+        },
+      },
+      OutletRevenue: {
+        type: 'object',
+        required: [
+          'outletId',
+          'outletCode',
+          'outletName',
+          'isActive',
+          'totalRevenue',
+          'totalSales',
+        ],
+        properties: {
+          outletId: { type: 'string', format: 'uuid' },
+          outletCode: { type: 'string' },
+          outletName: { type: 'string' },
+          isActive: { type: 'boolean' },
+          totalRevenue: { $ref: '#/components/schemas/AggregateMoney' },
+          totalSales: { $ref: '#/components/schemas/IntegerString' },
+        },
+      },
+      TopSellingItem: {
+        type: 'object',
+        required: ['rank', 'menuItemId', 'sku', 'name', 'quantitySold', 'totalRevenue'],
+        properties: {
+          rank: { type: 'integer', minimum: 1, maximum: 5 },
+          menuItemId: { type: 'string', format: 'uuid' },
+          sku: { type: 'string', description: 'Current master SKU' },
+          name: { type: 'string', description: 'Current master name' },
+          quantitySold: { $ref: '#/components/schemas/IntegerString' },
+          totalRevenue: { $ref: '#/components/schemas/AggregateMoney' },
         },
       },
       MoneyTotal: {
@@ -1543,6 +1624,122 @@ export const openApiDocument: OpenAPIV3.Document = {
           '401': errorResponse('Authentication required'),
           '403': errorResponse('No access to this outlet'),
           '404': errorResponse('Sale not found'),
+        },
+      },
+    },
+    '/reports/summary': {
+      get: {
+        tags: ['Reports'],
+        summary: 'Company-wide KPIs (HQ_ADMIN)',
+        description:
+          'Revenue, sale count and units sold over the half-open range [from, to). Outlet counts are current, independent of the range. All sales when the range is omitted.',
+        security: [{ bearerAuth: [] }],
+        parameters: reportRangeParameters,
+        responses: {
+          '200': {
+            description: 'Summary',
+            content: {
+              'application/json': responseEnvelope({
+                $ref: '#/components/schemas/BusinessSummary',
+              }),
+            },
+          },
+          ...reportErrors,
+        },
+      },
+    },
+    '/reports/revenue-by-outlet': {
+      get: {
+        tags: ['Reports'],
+        summary: 'Revenue per outlet (HQ_ADMIN)',
+        description:
+          'Every outlet, including inactive and zero-sale outlets. Default order: revenue desc, outlet id asc.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          ...reportRangeParameters,
+          { in: 'query', name: 'page', schema: { type: 'integer', minimum: 1, default: 1 } },
+          {
+            in: 'query',
+            name: 'limit',
+            schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+          },
+          {
+            in: 'query',
+            name: 'search',
+            schema: { type: 'string', maxLength: 100 },
+            description: 'Case-insensitive match on outlet code or name',
+          },
+          {
+            in: 'query',
+            name: 'sortBy',
+            schema: {
+              type: 'string',
+              enum: ['totalRevenue', 'totalSales', 'code'],
+              default: 'totalRevenue',
+            },
+          },
+          {
+            in: 'query',
+            name: 'sortOrder',
+            schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
+          },
+        ],
+        responses: {
+          '200': {
+            description: 'Paginated revenue by outlet',
+            content: {
+              'application/json': responseEnvelope({
+                type: 'object',
+                required: ['items', 'pagination'],
+                properties: {
+                  items: { type: 'array', items: { $ref: '#/components/schemas/OutletRevenue' } },
+                  pagination: { $ref: '#/components/schemas/Pagination' },
+                },
+              }),
+            },
+          },
+          ...reportErrors,
+        },
+      },
+    },
+    '/reports/outlets/{outletId}/top-selling-items': {
+      parameters: [outletIdParameter],
+      get: {
+        tags: ['Reports'],
+        summary: 'Top 5 items of an outlet by quantity (HQ_ADMIN)',
+        description:
+          'Inactive outlets are allowed. Ordered by quantity sold desc, then menu item id. Labels are the current master SKU and name.',
+        security: [{ bearerAuth: [] }],
+        parameters: reportRangeParameters,
+        responses: {
+          '200': {
+            description: 'Top-selling items',
+            content: {
+              'application/json': responseEnvelope({
+                type: 'object',
+                required: ['outlet', 'items'],
+                properties: {
+                  outlet: {
+                    type: 'object',
+                    required: ['id', 'code', 'name', 'isActive'],
+                    properties: {
+                      id: { type: 'string', format: 'uuid' },
+                      code: { type: 'string' },
+                      name: { type: 'string' },
+                      isActive: { type: 'boolean' },
+                    },
+                  },
+                  items: {
+                    type: 'array',
+                    maxItems: 5,
+                    items: { $ref: '#/components/schemas/TopSellingItem' },
+                  },
+                },
+              }),
+            },
+          },
+          ...reportErrors,
+          '404': errorResponse('Outlet not found'),
         },
       },
     },

@@ -2,8 +2,7 @@ import '@/config/load-env.js';
 import { randomUUID } from 'node:crypto';
 import { AppError } from '@/common/errors/app-error.js';
 import type { AuthenticatedUser } from '@/common/types/http.js';
-import { createPrismaClient } from '@/database/client.js';
-import { incrementReceiptCounter, lockReceiptCounter } from '@/database/locks.js';
+import type { DatabaseClient } from '@/database/client.js';
 import { Role } from '@/generated/prisma/enums.js';
 import { InventoryRepository } from '@/modules/inventory/inventory.repository.js';
 import { InventoryService } from '@/modules/inventory/inventory.service.js';
@@ -13,23 +12,13 @@ import { OutletRepository } from '@/modules/outlets/outlet.repository.js';
 import { SaleRepository } from '@/modules/sales/sale.repository.js';
 import { SaleService } from '@/modules/sales/sale.service.js';
 import { StaffRepository } from '@/modules/staff/staff.repository.js';
+import {
+  connectDisposableDatabase,
+  FIXTURE_CODE_PREFIX,
+  FIXTURE_EMAIL_DOMAIN,
+} from './support/disposable-database.js';
 
-const url = process.env.SALES_VERIFICATION_DATABASE_URL;
-if (!url || process.env.CONFIRM_DISPOSABLE_DATABASE !== 'yes') {
-  throw new Error(
-    'Refusing to run: set SALES_VERIFICATION_DATABASE_URL to a disposable, migrated database and CONFIRM_DISPOSABLE_DATABASE=yes.',
-  );
-}
-if (url === process.env.DATABASE_URL) {
-  throw new Error('Refusing to run against the configured application DATABASE_URL.');
-}
-
-const db = createPrismaClient({
-  DATABASE_URL: url,
-  DATABASE_POOL_MAX: 25,
-  DATABASE_CONNECTION_TIMEOUT_MS: 15_000,
-  DATABASE_IDLE_TIMEOUT_MS: 10_000,
-});
+const db = await connectDisposableDatabase('SALES_VERIFICATION_DATABASE_URL');
 const sales = new SaleService(new SaleRepository(db));
 const inventory = new InventoryService(new InventoryRepository(db));
 const outlets = new OutletRepository(db);
@@ -58,7 +47,7 @@ const codeOf = (outcome: PromiseSettledResult<unknown>): string =>
       : String(outcome.reason);
 
 async function createUser(role: Role): Promise<AuthenticatedUser> {
-  const email = `verify-${randomUUID()}@example.invalid`;
+  const email = `verify-${randomUUID()}${FIXTURE_EMAIL_DOMAIN}`;
   const user = await db.user.create({
     data: { email, passwordHash: 'not-a-login-account', role, isActive: true },
     select: { id: true, email: true, role: true },
@@ -77,14 +66,14 @@ async function createFixture(
 }> {
   const admin = await createUser(Role.HQ_ADMIN);
   const outlet = await outlets.createWithReceiptCounter({
-    code: `VERIFY-${tag()}`,
+    code: `${FIXTURE_CODE_PREFIX}${tag()}`,
     name: 'Concurrency verification outlet',
     address: null,
   });
   const itemIds: string[] = [];
   for (const item of items) {
     const created = await menuItems.create({
-      sku: `VERIFY-${tag()}`,
+      sku: `${FIXTURE_CODE_PREFIX}${tag()}`,
       name: `Verification item ${tag()}`,
       description: null,
       basePrice: item.price,
@@ -194,12 +183,16 @@ async function scenarioC(): Promise<void> {
       sell(cashier, outletId, [{ menuItemId: item, quantity: 2, price: '25.00' }], requestId),
     ),
   );
-  const saleIds = new Set(
-    outcomes.flatMap((outcome) => (outcome.status === 'fulfilled' ? [outcome.value.sale.id] : [])),
+  const fulfilled = outcomes.flatMap((outcome) =>
+    outcome.status === 'fulfilled' ? [outcome.value] : [],
   );
-  const created = outcomes.filter((o) => o.status === 'fulfilled' && !o.value.replayed).length;
+  const saleIds = new Set(fulfilled.map((result) => result.sale.id));
+  const created = fulfilled.filter((result) => !result.replayed).length;
+  const replayed = fulfilled.filter((result) => result.replayed).length;
+  check('C', 'all ten requests succeed', fulfilled.length === 10, outcomes.map(codeOf));
   check('C', 'all responses reference one sale', saleIds.size === 1, [...saleIds]);
-  check('C', 'exactly one creation, the rest replays', created === 1, outcomes.map(codeOf));
+  check('C', 'exactly one creation', created === 1, created);
+  check('C', 'exactly nine replays', replayed === 9, replayed);
   check(
     'C',
     'stock deducted once',
@@ -348,21 +341,50 @@ async function scenarioH(): Promise<void> {
   );
 }
 
+const INJECTED = 'Injected failure while persisting sale items';
+
+function failingSaleItems(client: DatabaseClient): DatabaseClient {
+  const wrapTransaction = (transaction: object): object =>
+    new Proxy(transaction, {
+      get(target, property, receiver): unknown {
+        const value: unknown = Reflect.get(target, property, receiver);
+        if (property !== 'saleItem' || typeof value !== 'object' || value === null) return value;
+        return new Proxy(value, {
+          get(delegate, method, inner): unknown {
+            if (method === 'createMany') return () => Promise.reject(new Error(INJECTED));
+            return Reflect.get(delegate, method, inner);
+          },
+        });
+      },
+    });
+  return new Proxy(client, {
+    get(target, property, receiver): unknown {
+      if (property !== '$transaction') return Reflect.get(target, property, receiver);
+      return (callback: (transaction: object) => Promise<unknown>, options?: unknown) =>
+        target.$transaction(
+          (transaction) => callback(wrapTransaction(transaction)),
+          options as Parameters<DatabaseClient['$transaction']>[1],
+        );
+    },
+  });
+}
+
 async function scenarioI(): Promise<void> {
-  const { outletId, itemIds } = await createFixture([{ price: '10.00', stock: 10 }]);
+  const { outletId, itemIds, staff } = await createFixture([{ price: '10.00', stock: 10 }]);
   const item = first(itemIds);
-  const failure = await Promise.allSettled([
-    db.$transaction(async (transaction) => {
-      await lockReceiptCounter(transaction, outletId);
-      await transaction.outletMenuItem.updateMany({
-        where: { outletId, menuItemId: item, stockQuantity: { gte: 3 } },
-        data: { stockQuantity: { decrement: 3 } },
-      });
-      await incrementReceiptCounter(transaction, outletId);
-      throw new Error('Injected failure after stock deduction and counter increment');
+  const faulty = new SaleService(new SaleRepository(failingSaleItems(db)));
+  const [failure] = await Promise.allSettled([
+    faulty.create(first(staff), outletId, {
+      requestId: randomUUID(),
+      items: [{ menuItemId: item, quantity: 3, expectedUnitPrice: '10.00' }],
     }),
   ]);
-  check('I', 'injected failure aborts the transaction', first(failure).status === 'rejected', null);
+  check(
+    'I',
+    'the real SaleRepository transaction fails at SaleItem persistence',
+    failure.status === 'rejected' && String(failure.reason).includes(INJECTED),
+    codeOf(failure),
+  );
   check(
     'I',
     'stock unchanged',
@@ -370,6 +392,13 @@ async function scenarioI(): Promise<void> {
     await stockOf(outletId, item),
   );
   check('I', 'counter unchanged', (await counterOf(outletId)) === 0, await counterOf(outletId));
+  check('I', 'no Sale rows', (await salesCount(outletId)) === 0, await salesCount(outletId));
+  check(
+    'I',
+    'no SaleItem rows',
+    (await db.saleItem.count({ where: { outletId } })) === 0,
+    await db.saleItem.count({ where: { outletId } }),
+  );
 }
 
 async function main(): Promise<void> {

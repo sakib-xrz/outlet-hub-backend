@@ -33,6 +33,10 @@ import { SaleController } from '@/modules/sales/sale.controller.js';
 import { SaleRepository } from '@/modules/sales/sale.repository.js';
 import { createSaleRouter } from '@/modules/sales/sale.route.js';
 import { SaleService } from '@/modules/sales/sale.service.js';
+import { ReportController } from '@/modules/reports/report.controller.js';
+import { ReportRepository } from '@/modules/reports/report.repository.js';
+import { createReportRouter } from '@/modules/reports/report.route.js';
+import { ReportService } from '@/modules/reports/report.service.js';
 import { HealthController } from '@/modules/health/health.controller.js';
 import { createHealthRouter } from '@/modules/health/health.route.js';
 
@@ -77,6 +81,8 @@ export function createApiRouter(database: DatabaseClient, config: AppConfig): Ro
     new MenuItemService(new MenuItemRepository(database)),
   );
   router.use('/menu-items', createMenuItemRouter(menuItemController, requireAuth));
+  const reportController = new ReportController(new ReportService(new ReportRepository(database)));
+  router.use('/reports', createReportRouter(reportController, requireAuth));
   router.use('/health', createHealthRouter(new HealthController(database, config)));
   return router;
 }
