@@ -1541,11 +1541,17 @@ export const openApiDocument: OpenAPIV3.Document = {
             description: 'Receipt number or code, e.g. 101 or MIRPUR-01-000101 (exact match)',
             schema: { type: 'string', maxLength: 40 },
           },
-          { in: 'query', name: 'from', schema: { type: 'string', format: 'date-time' } },
+          {
+            in: 'query',
+            name: 'from',
+            description: 'Inclusive start (ISO 8601 with offset)',
+            schema: { type: 'string', format: 'date-time' },
+          },
           {
             in: 'query',
             name: 'to',
-            description: 'At most 366 days after from',
+            description:
+              'Exclusive end (ISO 8601 with offset): after `from`, at most 366 days later',
             schema: { type: 'string', format: 'date-time' },
           },
           {

@@ -48,7 +48,7 @@ export function createApp({ config, database, logger }: AppDependencies): Expres
   app.use(
     cors({
       credentials: true,
-      methods: ['GET', 'POST'],
+      methods: ['GET', 'POST', 'PATCH', 'PUT'],
       allowedHeaders: ['authorization', 'content-type', 'x-request-id'],
       origin: (origin, callback) => {
         if (!origin || config.ALLOWED_ORIGINS.includes(origin)) return callback(null, true);

@@ -71,8 +71,8 @@ export const saleListQuerySchema = z
     if (!value.from || !value.to) return;
     const from = Date.parse(value.from);
     const to = Date.parse(value.to);
-    if (to < from) {
-      context.addIssue({ code: 'custom', path: ['to'], message: '`to` must not be before `from`' });
+    if (to <= from) {
+      context.addIssue({ code: 'custom', path: ['to'], message: '`to` must be after `from`' });
     } else if (to - from > MAX_DATE_RANGE_DAYS * 86_400_000) {
       context.addIssue({
         code: 'custom',

@@ -259,7 +259,7 @@ export class SaleRepository {
       ...((query.from ?? query.to) && {
         createdAt: {
           ...(query.from && { gte: new Date(query.from) }),
-          ...(query.to && { lte: new Date(query.to) }),
+          ...(query.to && { lt: new Date(query.to) }),
         },
       }),
     };

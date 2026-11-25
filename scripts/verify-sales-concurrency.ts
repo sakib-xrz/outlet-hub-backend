@@ -341,6 +341,58 @@ async function scenarioH(): Promise<void> {
   );
 }
 
+async function scenarioG2(): Promise<void> {
+  const { outletId, itemIds, staff, admin } = await createFixture([{ price: '40.00', stock: 10 }]);
+  const item = first(itemIds);
+  const [saleOutcome] = await Promise.allSettled([
+    sell(first(staff), outletId, [{ menuItemId: item, quantity: 2, price: '40.00' }]),
+    outletMenu.setActive(admin.id, outletId, item, false),
+  ]);
+  const code = codeOf(saleOutcome);
+  const stock = await stockOf(outletId, item);
+  check(
+    'G2',
+    'sale commits before the assignment is disabled or is ITEM_UNAVAILABLE after it',
+    (code === 'OK' && stock === 8) || (code === 'ITEM_UNAVAILABLE' && stock === 10),
+    { code, stock },
+  );
+  const stale = await Promise.allSettled([
+    sell(first(staff), outletId, [{ menuItemId: item, quantity: 1, price: '40.00' }]),
+  ]);
+  check(
+    'G2',
+    'a later sale of the disabled item is refused',
+    codeOf(first(stale)) === 'ITEM_UNAVAILABLE',
+    stale.map(codeOf),
+  );
+}
+
+async function scenarioH2(): Promise<void> {
+  const { outletId, itemIds, staff } = await createFixture([{ price: '10.00', stock: 10 }]);
+  const cashier = first(staff);
+  const [saleOutcome] = await Promise.allSettled([
+    sell(cashier, outletId, [{ menuItemId: first(itemIds), quantity: 1, price: '10.00' }]),
+    staffRepository.setActive(cashier.id, false),
+  ]);
+  const code = codeOf(saleOutcome);
+  const sales = await salesCount(outletId);
+  check(
+    'H2',
+    'sale commits before deactivation or is refused after it',
+    (code === 'OK' && sales === 1) || (code === 'AUTHORIZATION_ERROR' && sales === 0),
+    { code, sales },
+  );
+  const after = await Promise.allSettled([
+    sell(cashier, outletId, [{ menuItemId: first(itemIds), quantity: 1, price: '10.00' }]),
+  ]);
+  check(
+    'H2',
+    'a deactivated cashier cannot sell',
+    codeOf(first(after)) !== 'OK',
+    after.map(codeOf),
+  );
+}
+
 const INJECTED = 'Injected failure while persisting sale items';
 
 function failingSaleItems(client: DatabaseClient): DatabaseClient {
@@ -410,7 +462,9 @@ async function main(): Promise<void> {
     scenarioE,
     scenarioF,
     scenarioG,
+    scenarioG2,
     scenarioH,
+    scenarioH2,
     scenarioI,
   ]) {
     await scenario();

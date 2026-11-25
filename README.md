@@ -1,6 +1,24 @@
 # OutletHub Backend
 
-Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, **Outlet Management** (phase 1), **Staff & Outlet Membership Management** (phase 2), **Master Menu Management** (phase 3), **Outlet Menu Assignment & Price Overrides** (phase 4), **Inventory Management** (phase 5) and **POS Sales & Sequential Receipts** (phase 6). Reporting is not implemented yet. sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
+Production-oriented backend for OutletHub, a multi-outlet POS management system. It implements:
+
+- authentication and session management;
+- **Outlet Management**;
+- **Staff & Outlet Membership Management**;
+- **Master Menu Management**;
+- **Outlet Menu Assignment & Price Overrides**;
+- **Inventory Management**;
+- **POS Sales with idempotent checkout and sequential per-outlet receipts**;
+- **Revenue Reporting**;
+- health checks.
+
+OutletHub records sales; it does not process payments.
+
+**Documentation:**
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the implemented architecture, the scaling plan, a microservices evolution and an offline POS/KDS strategy.
+- [docs/VERIFICATION.md](docs/VERIFICATION.md): every executed check and its result.
+- [erd-diagram.pdf](erd-diagram.pdf) and [flowchart-diagram.pdf](flowchart-diagram.pdf).
 
 ## Stack
 
@@ -147,11 +165,11 @@ Use an absolute `sslrootcert` path. node-postgres treats `sslmode=require` as `v
 
 The schema is managed only through committed SQL migrations in `prisma/migrations/`. Nothing runs migrations or seeds automatically: not app startup, not the Docker build, not tests.
 
-| Migration                        | Contents                                                                                                                    |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `20261125000000_initial_auth`    | Users and refresh sessions                                                                                                  |
-| `20261125100000_business_domain` | Outlets, memberships, menu items, outlet stock/pricing, receipt counters, sales, sale items, and database CHECK constraints |
-| `20261126000000_money_not_nan`   | **Pending, not applied.** Additive `<> 'NaN'` checks on every money column                                                  |
+| Migration                        | Contents                                                                                                                                        |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `20261125000000_initial_auth`    | Users and refresh sessions                                                                                                                      |
+| `20261125100000_business_domain` | Outlets, memberships, menu items, outlet stock/pricing, receipt counters, sales, sale items, and database CHECK constraints                     |
+| `20261126000000_money_not_nan`   | **Applied** to the configured database (verified: all five constraints present and validated). Additive `<> 'NaN'` checks on every money column |
 
 The CHECK constraints are added in SQL because Prisma cannot express them:
 
@@ -453,12 +471,11 @@ All endpoints are under `/api/v1/menu-items` and require `HQ_ADMIN`. Outlet staf
 - **Shared helper:** `src/common/money.ts` (`moneySchema`, `serializeMoney`) is intended for outlet price overrides and sales.
 - **Currency:** a single currency, with no currency column. The frontend displays it as BDT (`৳`).
 
-**NaN gap and the pending migration:**
+**NaN guard migration:**
 
 - PostgreSQL `numeric` accepts `'NaN'` and sorts it above every number, so the existing `CHECK (base_price >= 0)` style constraints **accept NaN**. (`Infinity` is already rejected, because these columns declare a precision.)
 - The API never writes NaN. As defence in depth, `20261126000000_money_not_nan` adds `<> 'NaN'::numeric` checks to `menu_items.base_price`, `outlet_menu_items.override_price`, `sales.total_amount`, `sale_items.unit_price` and `sale_items.line_total`.
-- It is **not applied**. Apply it with approval via `pnpm db:migrate:status`, then `pnpm db:migrate:deploy`.
-- It fails if a NaN value already exists. Check first with `SELECT count(*) FROM menu_items WHERE base_price = 'NaN'` (and similarly for the other columns).
+- It is applied to the configured database. All five constraints are present and validated, and no NaN values exist; `pnpm db:audit` re-checks this. On a new database it is applied by `pnpm db:migrate:deploy` with the rest of the history. It would fail if a NaN value already existed.
 
 ### Rules for future outlet pricing and sales
 
@@ -773,7 +790,7 @@ The `by-request` route is registered before `/:saleId`.
 
 - Pagination.
 - `search`: a receipt number or code, such as `101` or `MIRPUR-01-000101`, matched exactly on the number.
-- `from`/`to` (ISO, at most 366 days apart).
+- `from`/`to` (ISO with offset): a half-open range `created_at >= from AND created_at < to`, at most 366 days, the same convention as the reports.
 - `sortBy`: `createdAt`, `receiptNumber` or `totalAmount`, with `id` as the tie-breaker.
 
 ### Transaction (one Read Committed interactive transaction)
@@ -865,7 +882,7 @@ SALES_VERIFICATION_DATABASE_URL=$VERIFY_URL CONFIRM_DISPOSABLE_DATABASE=yes pnpm
 
 Scenario I wraps the Prisma client in a script-local `Proxy` whose interactive transaction rejects `saleItem.createMany`, so the unmodified production `SaleRepository` deducts stock, increments the counter and inserts the `Sale` before failing. There is no failure-injection flag in application code.
 
-The script prints PASS or FAIL per check and exits non-zero on any failure. **It has not been run**, because no disposable PostgreSQL was available and the shared database must not be used. The unit tests (`sale-calculation`, `sales`, `sale-repository`) use mocks: they prove the orchestration (lock order, writes only after validation, no writes on replay or refusal, errors propagating from every write step), **not** PostgreSQL's locking or atomicity.
+The script prints PASS or FAIL per check and exits non-zero on any failure. **It has been executed on a disposable local PostgreSQL 18: 34/34 checks passed**, including two extra races (G2: assignment disabled mid-sale; H2: cashier deactivated mid-sale). See [docs/VERIFICATION.md](docs/VERIFICATION.md). The unit tests (`sale-calculation`, `sales`, `sale-repository`) use mocks: they prove the orchestration (lock order, writes only after validation, no writes on replay or refusal, errors propagating from every write step), **not** PostgreSQL's locking or atomicity.
 
 ### Comparison with the documented design
 
@@ -955,7 +972,63 @@ It then checks the report outputs:
 REPORTS_VERIFICATION_DATABASE_URL=$VERIFY_URL CONFIRM_DISPOSABLE_DATABASE=yes pnpm verify:reports
 ```
 
-**It has not been run.** No disposable local PostgreSQL was available, and the shared database must not be used. The unit tests (`reports`, `report-repository`, `disposable-database`) are mocked. They prove validation, authorization, SQL shape (joins, half-open filter, tie-breaks, parameter binding), serialization and the guard's refusals, but **not** PostgreSQL's results.
+**Executed on a disposable local PostgreSQL 18: 18/18 checks passed, and passed again on a second run against the same database.** Each run picks a random future month and refuses to seed unless that month (±1 day) contains no sales, so repeated runs cannot contaminate each other. The unit tests (`reports`, `report-repository`, `disposable-database`) are mocked. They prove validation, authorization, SQL shape (joins, half-open filter, tie-breaks, parameter binding), serialization and the guard's refusals, but **not** PostgreSQL's results.
+
+## API integration verification (real HTTP, real PostgreSQL)
+
+`scripts/verify-api-integration.ts` (`pnpm verify:api`) builds the **real Express app** (`createApp`) on a disposable local database behind the same guard. It drives the whole business flow through HTTP with Supertest, using real Argon2id hashes, real JWTs and refresh cookies, real transactions, stock deduction, receipts and report SQL. Nothing is mocked.
+
+The flow:
+
+1. HQ logs in, creates two outlets (receipt counters start at 0), a staff account and memberships.
+2. HQ creates three menu items, assigns them, sets overrides (`260` → `"260.00"`, `25.75`) and replenishes stock.
+3. Staff logs in, reads the menu, and is refused other outlets (menu, details, sales, inventory) and HQ-only endpoints with 403.
+4. Staff completes a multi-item sale (exact `984.50`, receipt `…-000001`, stock 18/2/16). A replay returns 200 with no second deduction; a different payload under the same id gets `IDEMPOTENCY_CONFLICT`. The next sale gets receipt 2.
+5. Receipt by id and by request id, history, and the historical name snapshot after a rename.
+6. Refusals: `INSUFFICIENT_STOCK` with `meta.availableQuantity`, stale price → `PRICE_CHANGED` with `meta.currentUnitPrice`, cross-outlet sale → 403, HQ sale → 403, disabled assignment and inactive master → `ITEM_UNAVAILABLE`, inactive outlet → refused (counter unchanged). Reports: exact summary delta, revenue by outlet including the zero-sale outlet, top-selling ranks, and a reversed range → 400.
+7. Auth: invalid and unknown credentials get the same 401, untrusted Origin → 403, refresh rotates the cookie, the rotated-out token → 401, logout then refresh → 401, deactivated staff cannot log in and their access token is rejected.
+
+```bash
+API_VERIFICATION_DATABASE_URL=$VERIFY_URL CONFIRM_DISPOSABLE_DATABASE=yes pnpm verify:api
+```
+
+Result: **75/75 checks passed**, on two consecutive runs. This includes a check that sessions run in UTC on a cluster whose server default is `Asia/Dhaka`.
+
+## Demo data (configured database)
+
+`pnpm db:seed:demo` (`prisma/seed-demo.ts`) seeds realistic demonstration data into the **configured** database through the production services. Outlets go through the outlet + receipt-counter transaction, staff through Argon2id hashing, assignments, stock through the guarded adjustment, and every sale through `SaleService.create`.
+
+**What it creates:**
+
+- Five outlets: `DEMO-MIRPUR`, `DEMO-GULSHAN`, `DEMO-DHANMONDI`, `DEMO-UTTARA` (assigned items and stock, no sales) and `DEMO-BANANI` (historical sales, then deactivated).
+- 32 master items (2 retired), 115 assignments: inherited and override prices, one `0.00` override, 3 inactive assignments, and high, medium, low and zero stock.
+- Six `OUTLET_STAFF` accounts (`staff.*@example.com`).
+- 500 historical sales over the 30 days before the first seeding day.
+
+**Safety and idempotency:**
+
+- Everything is namespaced (`DEMO-` codes and SKUs). The seed refuses to touch a same-named record that is not demo data.
+- Sales use deterministic request ids. The plan is anchored to the demo Mirpur outlet's creation day, so re-runs reproduce the same plan.
+- Stock is replenished once, to the target balance plus the planned consumption, and never reset after sales exist.
+- Historical timestamps are applied only to sales created by the seed's own deterministic request ids.
+- Banani is deactivated only after all of its planned sales exist.
+- An interrupted run resumes where it stopped. This was tested by killing a run at 225/500 sales; the resumed run reached an identical end state.
+
+**Passwords:**
+
+- New accounts get random passwords. They are printed once and, with `DEMO_CREDENTIALS_FILE=<path>`, written to a `0600` file outside the repository.
+- Re-runs never rotate them. `pnpm db:seed:demo --rotate-demo-passwords` explicitly issues new passwords for the demo staff accounts only.
+- Passwords are never stored in source or docs.
+
+`pnpm db:audit` is read-only. It prints counts, integrity checks (separately for demo and existing data) and business figures for the configured database.
+
+## Known limitations
+
+- **Payments:** no payments, discounts, taxes, refunds or offline POS. A "sale" is a recorded transaction.
+- **Rate limits:** in-memory per process; use a shared store before scaling out.
+- **Interactive transactions:** they use Prisma's default 5 s timeout. Run the API close to the database; from a remote client (~160 ms round trip) a sale takes about 3 s.
+- **Audit trail:** no audit log of stock adjustments (only the current balance is stored).
+- **Load:** no sustained load test was run. Query timings come from a 100,000-sale synthetic dataset on a local disposable database; see [docs/VERIFICATION.md](docs/VERIFICATION.md).
 
 ## Docker (application only)
 
@@ -1024,13 +1097,17 @@ Compose has no database service. It reads `.env.production` at runtime and publi
 | `pnpm db:seed:admin`                | Explicitly seed/rotate the HQ admin (**writes**)               |
 | `pnpm verify:sales-concurrency`     | Concurrency scenarios on a **local disposable** database only  |
 | `pnpm verify:reports`               | Report fixtures and checks on a **local disposable** database  |
+| `pnpm verify:api`                   | Full HTTP business flow on a **local disposable** database     |
+| `pnpm db:seed:demo`                 | Idempotent demo data in the configured database (**writes**)   |
+| `pnpm db:audit`                     | Read-only counts and integrity checks                          |
 
 There is no external CI. Coolify builds from Git. Husky runs lint-staged on commit and enforces Conventional Commits. Run `pnpm verify && pnpm security:audit` before pushing.
 
 ## Security considerations
 
 - Helmet sets API-focused security headers, and Express fingerprinting is disabled. CORS and state-changing cookie endpoints use exact origin allowlists. All input is validated.
-- Prisma parameterizes queries. Raw SQL is limited to the static readiness query and committed migrations.
+- Prisma parameterizes queries. Raw SQL (row locks, reports) uses tagged templates with bound parameters. `Prisma.raw` appears only for allowlisted constant fragments.
+- Every database session is pinned to `TimeZone=UTC`, because the node-postgres adapter sends `Date` parameters without an offset.
 - Use `sslmode=require` with `sslrootcert` for any connection over the internet. Prefer an SSH tunnel or the internal Coolify network over a publicly exposed port. If a port must be exposed, restrict it by IP.
 - Credentials exist only in ignored env files or in Coolify's runtime variables. They are never in Git, the build context, or image layers.
 - Authorization headers, cookies, passwords, tokens, `DATABASE_URL`, and `JWT_SECRET` are redacted from logs. Production responses hide internal errors.

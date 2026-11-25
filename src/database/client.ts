@@ -25,6 +25,7 @@ export function buildDatabaseOptions(config: DatabaseConfig): {
       max: config.DATABASE_POOL_MAX,
       connectionTimeoutMillis: config.DATABASE_CONNECTION_TIMEOUT_MS,
       idleTimeoutMillis: config.DATABASE_IDLE_TIMEOUT_MS,
+      options: '-c TimeZone=UTC',
     },
     schema,
   };

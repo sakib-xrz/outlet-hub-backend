@@ -20,4 +20,14 @@ describe('database connection options', () => {
       idleTimeoutMillis: 20_000,
     });
   });
+
+  it('pins every session to UTC so Date parameters are not shifted by the server time zone', () => {
+    const { pool } = buildDatabaseOptions({
+      DATABASE_URL: 'postgresql://user:password@localhost:5432/outlethub',
+      DATABASE_POOL_MAX: 1,
+      DATABASE_CONNECTION_TIMEOUT_MS: 1000,
+      DATABASE_IDLE_TIMEOUT_MS: 1000,
+    });
+    expect(pool.options).toBe('-c TimeZone=UTC');
+  });
 });

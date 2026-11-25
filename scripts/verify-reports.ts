@@ -1,5 +1,5 @@
 import '@/config/load-env.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { Role } from '@/generated/prisma/enums.js';
 import { ReportRepository } from '@/modules/reports/report.repository.js';
 import type { DateRange } from '@/modules/reports/report.types.js';
@@ -18,10 +18,34 @@ function check(name: string, passed: boolean, detail: unknown): void {
 }
 
 const tag = randomUUID().slice(0, 6).toUpperCase();
-const FROM = new Date('2099-03-01T00:00:00.000Z');
-const TO = new Date('2099-04-01T00:00:00.000Z');
+async function emptyWindow(): Promise<{ from: Date; to: Date }> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const year = randomInt(2100, 9000);
+    const month = randomInt(0, 12);
+    const from = new Date(Date.UTC(year, month, 1));
+    const to = new Date(Date.UTC(year, month + 1, 1));
+    const probe = await reports.summary({ from, to });
+    const nearby = await db.sale.count({
+      where: {
+        createdAt: {
+          gte: new Date(from.getTime() - 86_400_000),
+          lt: new Date(to.getTime() + 86_400_000),
+        },
+      },
+    });
+    if (probe.totalSales === '0' && nearby === 0) return { from, to };
+  }
+  throw new Error('Could not find an unused fixture window; use a fresh database.');
+}
+
+const { from: FROM, to: TO } = await emptyWindow();
 const WINDOW: DateRange = { from: FROM, to: TO };
-const MID = new Date('2099-03-15T12:00:00.000Z');
+const MID = new Date(FROM.getTime() + 14 * 86_400_000 + 12 * 3_600_000);
+const BEFORE_WINDOW = new Date(FROM.getTime() - 1);
+const EMPTY_WINDOW: DateRange = {
+  from: new Date(FROM.getTime() - 40 * 86_400_000),
+  to: new Date(FROM.getTime() - 2 * 86_400_000),
+};
 
 const cents = (money: string): bigint => BigInt(money.replace('.', ''));
 
@@ -112,9 +136,7 @@ async function main(): Promise<void> {
     { item: item(7), quantity: 1, price: '1.00' },
   ]);
   await sale(busy.id, TO, [{ item: item(4), quantity: 100, price: '1.00' }]);
-  await sale(busy.id, new Date(FROM.getTime() - 1), [
-    { item: item(5), quantity: 50, price: '1.00' },
-  ]);
+  await sale(busy.id, BEFORE_WINDOW, [{ item: item(5), quantity: 50, price: '1.00' }]);
   await sale(closed.id, MID, [{ item: item(1), quantity: 1, price: '10.00' }]);
   await db.outlet.update({ where: { id: closed.id }, data: { isActive: false } });
   await db.menuItem.update({ where: { id: item(1) }, data: { name: 'Renamed burger' } });
@@ -150,10 +172,7 @@ async function main(): Promise<void> {
     after: after.totalSales,
   });
 
-  const empty = await reports.summary({
-    from: new Date('2098-01-01T00:00:00Z'),
-    to: new Date('2098-02-01T00:00:00Z'),
-  });
+  const empty = await reports.summary(EMPTY_WINDOW);
   check(
     'empty range returns zeros',
     empty.totalRevenue === '0.00' && empty.totalSales === '0' && empty.totalUnitsSold === '0',
@@ -242,6 +261,7 @@ async function main(): Promise<void> {
     null,
   );
 
+  process.stdout.write(`Fixture window ${FROM.toISOString()} – ${TO.toISOString()}, tag ${tag}\n`);
   for (const result of results) {
     process.stdout.write(`${result.passed ? 'PASS' : 'FAIL'}  ${result.check}  ${result.detail}\n`);
   }

@@ -313,6 +313,7 @@ describe('reading sales', () => {
     'search=abc',
     'sortBy=createdById',
     'from=2026-01-02T00:00:00Z&to=2026-01-01T00:00:00Z',
+    'from=2026-01-02T00:00:00Z&to=2026-01-02T00:00:00Z',
     'from=2024-01-01T00:00:00Z&to=2026-01-01T00:00:00Z',
   ])('rejects %s', async (query) => {
     await request(app()).get(`${BASE}?${query}`).set(asAdmin).expect(400);
