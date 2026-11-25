@@ -25,14 +25,16 @@ enum SessionRevokeReason {
 }
 
 model User {
-  id           String           @id @default(uuid()) @db.Uuid
-  email        String           @unique @db.VarChar(320)
-  passwordHash String           @map("password_hash") @db.VarChar(255)
+  id           String             @id @default(uuid()) @db.Uuid
+  email        String             @unique @db.VarChar(320)
+  passwordHash String             @map("password_hash") @db.VarChar(255)
   role         Role
-  isActive     Boolean          @default(true) @map("is_active")
-  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt    DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  isActive     Boolean            @default(true) @map("is_active")
+  createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
   sessions     RefreshSession[]
+  memberships  OutletMembership[]
+  sales        Sale[]
 
   @@index([isActive])
   @@map("users")
@@ -56,4 +58,112 @@ model RefreshSession {
   @@index([familyId])
   @@index([expiresAt])
   @@map("refresh_sessions")
+}
+
+model Outlet {
+  id             String             @id @default(uuid()) @db.Uuid
+  code           String             @unique @db.VarChar(20)
+  name           String             @db.VarChar(150)
+  address        String?            @db.VarChar(500)
+  isActive       Boolean            @default(true) @map("is_active")
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  memberships    OutletMembership[]
+  menuItems      OutletMenuItem[]
+  sales          Sale[]
+  receiptCounter ReceiptCounter?
+
+  @@map("outlets")
+}
+
+model OutletMembership {
+  userId    String   @map("user_id") @db.Uuid
+  outletId  String   @map("outlet_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  outlet    Outlet   @relation(fields: [outletId], references: [id], onDelete: Restrict)
+
+  @@id([userId, outletId])
+  @@index([outletId])
+  @@map("outlet_memberships")
+}
+
+model MenuItem {
+  id          String           @id @default(uuid()) @db.Uuid
+  sku         String           @unique @db.VarChar(50)
+  name        String           @db.VarChar(150)
+  description String?          @db.VarChar(1000)
+  basePrice   Decimal          @map("base_price") @db.Decimal(12, 2)
+  isActive    Boolean          @default(true) @map("is_active")
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  outlets     OutletMenuItem[]
+
+  @@map("menu_items")
+}
+
+// One record is both the assignment and the current stock balance.
+model OutletMenuItem {
+  outletId      String     @map("outlet_id") @db.Uuid
+  menuItemId    String     @map("menu_item_id") @db.Uuid
+  overridePrice Decimal?   @map("override_price") @db.Decimal(12, 2)
+  stockQuantity Int        @default(0) @map("stock_quantity")
+  isActive      Boolean    @default(true) @map("is_active")
+  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+  outlet        Outlet     @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  menuItem      MenuItem   @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  saleItems     SaleItem[]
+
+  @@id([outletId, menuItemId])
+  @@index([menuItemId])
+  @@map("outlet_menu_items")
+}
+
+// Created in the same transaction as its outlet; zero before first sale.
+model ReceiptCounter {
+  outletId   String @id @map("outlet_id") @db.Uuid
+  lastNumber Int    @default(0) @map("last_number")
+  outlet     Outlet @relation(fields: [outletId], references: [id], onDelete: Restrict)
+
+  @@map("receipt_counters")
+}
+
+// Completed sales only; no editable cart or draft order persists here.
+model Sale {
+  id            String     @id @default(uuid()) @db.Uuid
+  outletId      String     @map("outlet_id") @db.Uuid
+  createdById   String     @map("created_by_id") @db.Uuid
+  receiptNumber Int        @map("receipt_number")
+  requestId     String     @map("request_id") @db.Uuid
+  requestHash   String     @map("request_hash") @db.Char(64)
+  totalAmount   Decimal    @map("total_amount") @db.Decimal(16, 2)
+  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  outlet        Outlet     @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  createdBy     User       @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  items         SaleItem[]
+
+  @@unique([outletId, receiptNumber])
+  @@unique([outletId, requestId])
+  // Enables a composite FK that prevents cross-outlet sale lines.
+  @@unique([id, outletId])
+  @@index([outletId, createdAt])
+  @@index([createdById])
+  @@map("sales")
+}
+
+model SaleItem {
+  saleId     String         @map("sale_id") @db.Uuid
+  outletId   String         @map("outlet_id") @db.Uuid
+  menuItemId String         @map("menu_item_id") @db.Uuid
+  itemName   String         @map("item_name") @db.VarChar(150)
+  quantity   Int
+  unitPrice  Decimal        @map("unit_price") @db.Decimal(12, 2)
+  lineTotal  Decimal        @map("line_total") @db.Decimal(16, 2)
+  sale       Sale           @relation(fields: [saleId, outletId], references: [id, outletId], onDelete: Restrict, onUpdate: Restrict)
+  assignment OutletMenuItem @relation(fields: [outletId, menuItemId], references: [outletId, menuItemId], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([saleId, menuItemId])
+  @@index([outletId, menuItemId])
+  @@map("sale_items")
 }
