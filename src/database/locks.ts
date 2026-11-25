@@ -37,13 +37,13 @@ export async function lockOutletMenuItem(
   client: DatabaseExecutor,
   outletId: string,
   menuItemId: string,
-): Promise<{ isActive: boolean } | null> {
-  const rows = await client.$queryRaw<{ is_active: boolean }[]>`
-    SELECT is_active FROM outlet_menu_items
+): Promise<{ isActive: boolean; stockQuantity: number } | null> {
+  const rows = await client.$queryRaw<{ is_active: boolean; stock_quantity: number }[]>`
+    SELECT is_active, stock_quantity FROM outlet_menu_items
     WHERE outlet_id = ${outletId}::uuid AND menu_item_id = ${menuItemId}::uuid
     FOR UPDATE`;
   const row = rows[0];
-  return row ? { isActive: row.is_active } : null;
+  return row ? { isActive: row.is_active, stockQuantity: row.stock_quantity } : null;
 }
 
 export async function lockMenuItemShared(
@@ -54,4 +54,12 @@ export async function lockMenuItemShared(
     SELECT is_active FROM menu_items WHERE id = ${menuItemId}::uuid FOR SHARE`;
   const row = rows[0];
   return row ? { isActive: row.is_active } : null;
+}
+
+export async function lockActiveHqAdmin(
+  client: DatabaseExecutor,
+  userId: string,
+): Promise<boolean> {
+  const user = await lockUser(client, userId, 'share');
+  return user?.isActive === true && user.role === 'HQ_ADMIN';
 }

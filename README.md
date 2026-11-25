@@ -1,6 +1,6 @@
 # OutletHub Backend
 
-Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, **Outlet Management** (phase 1), **Staff & Outlet Membership Management** (phase 2), **Master Menu Management** (phase 3) and **Outlet Menu Assignment & Price Overrides** (phase 4). Inventory, sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
+Production-oriented backend for OutletHub, a multi-outlet POS management system. It contains the platform infrastructure, authentication and session management, health checks, **Outlet Management** (phase 1), **Staff & Outlet Membership Management** (phase 2), **Master Menu Management** (phase 3), **Outlet Menu Assignment & Price Overrides** (phase 4) and **Inventory Management** (phase 5). sales, receipt and reporting features are not implemented yet; their tables exist in the schema for later phases.
 
 ## Stack
 
@@ -29,6 +29,7 @@ src/
 │   ├── access/             # outlet-access checks (membership, HQ scope)
 │   ├── auth/               # routes → controller → service → repository
 │   ├── health/             # liveness and readiness
+│   ├── inventory/          # outlet stock balances and adjustments
 │   ├── menu-items/         # master menu (HQ only)
 │   ├── outlet-menu-items/  # outlet menu assignments and price overrides
 │   ├── outlets/            # outlet management
@@ -555,6 +556,7 @@ users  →  outlets  →  receipt_counters  →  outlet_menu_items (by menu_item
 | **Assign**                            | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE` (if one exists), master item `FOR SHARE`, `INSERT`                    |
 | **Price override**                    | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE`, `UPDATE override_price` only                                         |
 | **Assignment status**                 | admin `users FOR SHARE`, outlet `FOR SHARE`, assignment `FOR UPDATE`, master item `FOR SHARE` (reactivation only), `UPDATE is_active` only |
+| **Stock adjustment**                  | admin `users FOR SHARE`, outlet `FOR SHARE` (must be active), assignment `FOR UPDATE`, `UPDATE stock_quantity` only                        |
 
 - **Admin re-check:** each write re-checks, under a shared lock, that the acting user is still an active `HQ_ADMIN`.
 - **Parent checks are atomic:** they happen while the parents are locked `FOR SHARE`, so a concurrent outlet or master-item deactivation (an `UPDATE`) either waits for the assignment to commit or is seen as inactive.
@@ -590,6 +592,127 @@ users  →  outlets  →  receipt_counters  →  outlet_menu_items (by menu_item
 5. Deactivate the master item, then try `PATCH …/status {"isActive":true}` → 409. Deactivating the assignment still works.
 6. As a staff member of the outlet, `GET /outlets/:o/menu-items` lists only enabled items, zero-stock ones included. Disabled items return 404 on the detail endpoint. Another outlet's menu returns 403.
 7. Lock check: in `psql`, `BEGIN; SELECT * FROM outlets WHERE id = '<o>' FOR UPDATE;`, then call the assign endpoint. It waits until you `ROLLBACK`.
+
+## Inventory API
+
+Stock lives in `outlet_menu_items.stock_quantity`: one current balance per outlet assignment. There is no inventory or movement table, so **adjustments are not recorded as history**. Only the resulting balance is stored.
+
+| Method  | Path                                              | Access                                     |
+| ------- | ------------------------------------------------- | ------------------------------------------ |
+| `GET`   | `/outlets/:outletId/inventory`                    | HQ admin; staff with access to that outlet |
+| `GET`   | `/outlets/:outletId/inventory/:menuItemId`        | HQ admin; staff with access to that outlet |
+| `PATCH` | `/outlets/:outletId/inventory/:menuItemId/adjust` | `HQ_ADMIN`                                 |
+
+**Response (`InventoryItem`):**
+
+- **Identity:** `outletId`, `menuItemId`, `sku`, `name`.
+- **Stock:** `stockQuantity` and `stockStatus`.
+- **Sales status:** `isActive` (the assignment), `outletIsActive`, `menuItemIsActive`, `isEnabled`, `isSellable`.
+- **`updatedAt`**.
+- The serializer reuses the outlet-menu mapping, so availability is calculated in one place.
+
+**Stock status** uses one fixed threshold, `LOW_STOCK_THRESHOLD = 10` in `inventory.validation.ts`:
+
+| Status         | Quantity     |
+| -------------- | ------------ |
+| `OUT_OF_STOCK` | 0            |
+| `LOW`          | 1–10         |
+| `IN_STOCK`     | more than 10 |
+
+Stock status is separate from sales availability. An inactive item holding 100 units is `IN_STOCK` but not sellable.
+
+**Listing:**
+
+- Same `page`/`limit` contract as other lists.
+- `search` matches SKU or name.
+- `status` filters by assignment status.
+- `stockStatus` is `all`, `out_of_stock`, `low` or `in_stock`.
+- `sortBy` is `sku`, `name`, `stockQuantity` or `updatedAt`, with `menuItemId` as the tie-breaker.
+- Everything, including the staff restriction, is part of the Prisma `where` for both items and count.
+
+**Access:**
+
+- **Staff:** see only enabled items in their active outlets, zero stock included. They get 403 for an outlet they don't belong to, and 404 for disabled items.
+- **HQ admins:** see everything, including inactive outlets, assignments and master items.
+
+### Adjustments
+
+```json
+{ "operation": "INCREASE", "quantity": 20 }
+{ "operation": "DECREASE", "quantity": 15 }
+{ "operation": "SET", "quantity": 40, "expectedStockQuantity": 50 }
+```
+
+**Validation:**
+
+- Quantities are JSON integers. Strings, fractions, negatives and values above `2147483647` (PostgreSQL `INTEGER`) are rejected.
+- `INCREASE`/`DECREASE` need a quantity of 1 or more. `SET` accepts 0 or more.
+- `SET` **requires** `expectedStockQuantity`; the other operations **reject** it. Unknown fields, including any client-calculated result, are rejected.
+
+**Response:** `{ inventoryItem, operation, previousStockQuantity, newStockQuantity, changed }`. Every value is read inside the adjustment transaction, from the locked row.
+
+| Result                                                                      | Status / code                                                  |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| Adjusted, or a `SET` to the current value (no write, `updatedAt` unchanged) | 200                                                            |
+| Outlet or assignment not found (an assignment is never created implicitly)  | 404                                                            |
+| Outlet inactive                                                             | 409 `OUTLET_INACTIVE`                                          |
+| `expectedStockQuantity` doesn't match the locked balance                    | 409 `STOCK_CHANGED` (the message includes the current balance) |
+| The result would go below 0                                                 | 409 `INSUFFICIENT_STOCK`                                       |
+| The result would exceed 2147483647                                          | 409 `STOCK_LIMIT_EXCEEDED`                                     |
+| Transaction aborted twice by a serialization failure or deadlock            | 409 `CONCURRENT_UPDATE`                                        |
+
+- Inactive assignments and inactive master items **can** be corrected, provided the outlet is active.
+- Adjusting never touches prices, assignment status, the master item, receipt counters or sales.
+
+### Transaction and concurrency strategy
+
+The adjustment runs in one Read Committed transaction:
+
+1. `users FOR SHARE`: the acting user must still be an active `HQ_ADMIN`.
+2. `outlets FOR SHARE`: the outlet must exist and be active.
+3. `outlet_menu_items FOR UPDATE` on `(outlet_id, menu_item_id)`: `stock_quantity` is read **from this locked row**.
+4. Check `SET`'s `expectedStockQuantity` against the locked value, then compute the new balance and check the range.
+5. `UPDATE … SET stock_quantity = $new`. No other column is written.
+6. Return previous and new values, and commit. Any error rolls everything back.
+
+**Why there are no lost updates:**
+
+- The assignment row lock serializes every writer of that row: other adjustments, future sale deductions, and price or status edits.
+- A second concurrent adjustment blocks on `FOR UPDATE` until the first commits. It then reads the **committed** balance (Read Committed re-reads the locked row), so two `+5` adjustments from 10 end at 20.
+- For two `−7` adjustments from 10, the second sees 3 and gets 409 `INSUFFICIENT_STOCK`.
+- No value read outside the transaction is ever used to compute an update.
+- `CHECK (stock_quantity >= 0)` from the business migration remains the final safety net.
+
+**Interaction with other operations:**
+
+- **Outlet deactivation** (`UPDATE outlets`) waits for the `FOR SHARE` lock, or is seen first, in which case the adjustment gets 409.
+- **Membership changes** don't affect admin adjustments.
+- **Price and status edits** on the same assignment serialize on the row lock and write disjoint columns.
+
+**Retries:**
+
+- PostgreSQL may abort a transaction with a serialization failure or deadlock (Prisma `P2034`). Nothing was applied in that case, so the service retries **once on the server**, with a fresh transaction re-reading the locked balance.
+- Other failures are not retried.
+- The client must never replay an `INCREASE` or `DECREASE` after an ambiguous failure, such as a timeout or network drop. They are **not idempotent**, and re-sending could double-apply. Re-read the balance, or use `SET` with `expectedStockQuantity`, which is safe to retry.
+- Deadlocks are unlikely, given the global lock order, but not impossible.
+
+**Phase 6 sales** use the same protocol: after the cashier `users` and `outlets` locks and the receipt counter, they lock each line's assignment `FOR UPDATE` in `menu_item_id` order, check `stock_quantity >= quantity`, then decrement in the same transaction.
+
+**Testing:**
+
+- `tests/unit/inventory.test.ts` covers HTTP behavior: scoping, isolation, the validation matrix, every 409 code, and the single P2034 retry.
+- `tests/unit/inventory-repository.test.ts` covers threshold boundaries, the balance maths including `MAX`, the exact lock order, the stock-only update, the no-op `SET`, refusals without writes, and rollback propagation.
+- These use mocked Prisma and **do not prove PostgreSQL locking**; see below.
+
+### Manual PostgreSQL verification (do not run without approval; use disposable records)
+
+1. **Concurrent increases:** set stock to 10 via `SET`. Send two `{"operation":"INCREASE","quantity":5}` requests simultaneously (two terminals, or `xargs -P2`). Final stock is 20.
+2. **Concurrent decreases:** from 10, send two simultaneous `DECREASE 7`. One returns 200 and one returns 409 `INSUFFICIENT_STOCK`. Final stock is 3.
+3. **Stale SET:** read stock (for example 3), adjust it by `INCREASE 1`, then `SET` with `expectedStockQuantity: 3` → 409 `STOCK_CHANGED`.
+4. **Competing with outlet deactivation:** in `psql`, `BEGIN; UPDATE outlets SET is_active = false WHERE id = '<o>';`, then call adjust; it blocks. `COMMIT` → the request returns 409 `OUTLET_INACTIVE`. Repeat with `ROLLBACK` → it succeeds.
+5. **Database safety net:** `UPDATE outlet_menu_items SET stock_quantity = -1 WHERE …` fails with `outlet_menu_items_stock_quantity_nonnegative`.
+6. **Failure leaves the balance alone:** a rejected adjustment leaves `stock_quantity` unchanged.
+7. **No side effects:** after adjustments, `override_price`, `is_active`, `menu_items.*`, `receipt_counters` and `sales` are unchanged.
 
 ## Docker (application only)
 

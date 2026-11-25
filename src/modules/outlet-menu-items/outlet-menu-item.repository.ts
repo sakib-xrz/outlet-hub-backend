@@ -1,13 +1,12 @@
 import { serializeMoney } from '@/common/money.js';
-import type { DatabaseClient, DatabaseExecutor } from '@/database/client.js';
+import type { DatabaseClient } from '@/database/client.js';
 import {
+  lockActiveHqAdmin,
   lockMenuItemShared,
   lockOutletMenuItem,
   lockOutletShared,
-  lockUser,
 } from '@/database/locks.js';
 import type { Prisma } from '@/generated/prisma/client.js';
-import { Role } from '@/generated/prisma/enums.js';
 import type {
   AssignmentWriteResult,
   OutletMenuItem,
@@ -15,7 +14,7 @@ import type {
   OutletMenuScope,
 } from '@/modules/outlet-menu-items/outlet-menu-item.types.js';
 
-const assignmentSelect = {
+export const assignmentSelect = {
   outletId: true,
   menuItemId: true,
   overridePrice: true,
@@ -29,7 +28,7 @@ const assignmentSelect = {
   },
 } satisfies Prisma.OutletMenuItemSelect;
 
-type AssignmentRow = Prisma.OutletMenuItemGetPayload<{ select: typeof assignmentSelect }>;
+export type AssignmentRow = Prisma.OutletMenuItemGetPayload<{ select: typeof assignmentSelect }>;
 
 export function toOutletMenuItem(row: AssignmentRow): OutletMenuItem {
   const hasOverride = row.overridePrice !== null;
@@ -56,7 +55,10 @@ export function toOutletMenuItem(row: AssignmentRow): OutletMenuItem {
   };
 }
 
-function scopeWhere(outletId: string, scope: OutletMenuScope): Prisma.OutletMenuItemWhereInput {
+export function scopeWhere(
+  outletId: string,
+  scope: OutletMenuScope,
+): Prisma.OutletMenuItemWhereInput {
   if (scope.kind === 'all') return { outletId };
   return {
     outletId,
@@ -92,11 +94,6 @@ function orderBy(query: OutletMenuListQuery): Prisma.OutletMenuItemOrderByWithRe
       ? { menuItem: { [query.sortBy]: query.sortOrder } }
       : { [query.sortBy]: query.sortOrder };
   return [primary, { menuItemId: 'asc' }];
-}
-
-async function lockActingAdmin(client: DatabaseExecutor, adminId: string): Promise<boolean> {
-  const admin = await lockUser(client, adminId, 'share');
-  return admin?.isActive === true && admin.role === Role.HQ_ADMIN;
 }
 
 export class OutletMenuItemRepository {
@@ -140,7 +137,7 @@ export class OutletMenuItemRepository {
     overridePrice: string | null,
   ): Promise<AssignmentWriteResult> {
     return this.database.$transaction(async (transaction) => {
-      if (!(await lockActingAdmin(transaction, adminId))) return { kind: 'forbidden' };
+      if (!(await lockActiveHqAdmin(transaction, adminId))) return { kind: 'forbidden' };
       const outlet = await lockOutletShared(transaction, outletId);
       if (!outlet) return { kind: 'outlet-not-found' };
       if (!outlet.isActive) return { kind: 'outlet-inactive' };
@@ -164,7 +161,7 @@ export class OutletMenuItemRepository {
     overridePrice: string | null,
   ): Promise<AssignmentWriteResult> {
     return this.database.$transaction(async (transaction) => {
-      if (!(await lockActingAdmin(transaction, adminId))) return { kind: 'forbidden' };
+      if (!(await lockActiveHqAdmin(transaction, adminId))) return { kind: 'forbidden' };
       if (!(await lockOutletShared(transaction, outletId))) return { kind: 'outlet-not-found' };
       if (!(await lockOutletMenuItem(transaction, outletId, menuItemId))) {
         return { kind: 'assignment-not-found' };
@@ -184,7 +181,7 @@ export class OutletMenuItemRepository {
     isActive: boolean,
   ): Promise<AssignmentWriteResult> {
     return this.database.$transaction(async (transaction) => {
-      if (!(await lockActingAdmin(transaction, adminId))) return { kind: 'forbidden' };
+      if (!(await lockActiveHqAdmin(transaction, adminId))) return { kind: 'forbidden' };
       const outlet = await lockOutletShared(transaction, outletId);
       if (!outlet) return { kind: 'outlet-not-found' };
       const assignment = await lockOutletMenuItem(transaction, outletId, menuItemId);

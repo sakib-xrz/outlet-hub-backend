@@ -259,6 +259,39 @@ export const openApiDocument: OpenAPIV3.Document = {
           updatedAt: { type: 'string', format: 'date-time' },
         },
       },
+      InventoryItem: {
+        type: 'object',
+        description:
+          'Stock of one outlet assignment. stockStatus: OUT_OF_STOCK (0), LOW (1–10), IN_STOCK (>10). Stock status is independent of sales availability (isEnabled / isSellable).',
+        required: [
+          'outletId',
+          'menuItemId',
+          'sku',
+          'name',
+          'stockQuantity',
+          'stockStatus',
+          'isActive',
+          'outletIsActive',
+          'menuItemIsActive',
+          'isEnabled',
+          'isSellable',
+          'updatedAt',
+        ],
+        properties: {
+          outletId: { type: 'string', format: 'uuid' },
+          menuItemId: { type: 'string', format: 'uuid' },
+          sku: { type: 'string' },
+          name: { type: 'string' },
+          stockQuantity: { type: 'integer', minimum: 0, maximum: 2147483647 },
+          stockStatus: { type: 'string', enum: ['OUT_OF_STOCK', 'LOW', 'IN_STOCK'] },
+          isActive: { type: 'boolean', description: 'Assignment status' },
+          outletIsActive: { type: 'boolean' },
+          menuItemIsActive: { type: 'boolean' },
+          isEnabled: { type: 'boolean' },
+          isSellable: { type: 'boolean' },
+          updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
       User: {
         type: 'object',
         required: ['id', 'email', 'role'],
@@ -1083,6 +1116,184 @@ export const openApiDocument: OpenAPIV3.Document = {
           },
           '404': errorResponse('Outlet or assignment not found'),
           '409': errorResponse('Cannot reactivate while the outlet or master item is inactive'),
+          ...hqAdminErrors,
+        },
+      },
+    },
+    '/outlets/{outletId}/inventory': {
+      parameters: [outletIdParameter],
+      get: {
+        tags: ['Inventory'],
+        summary: "List an outlet's inventory",
+        description:
+          'HQ_ADMIN: every assignment of any existing outlet, including inactive assignments and inactive master items. OUTLET_STAFF: only active outlets they belong to (403 otherwise) and only enabled items, zero stock included.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { in: 'query', name: 'page', schema: { type: 'integer', minimum: 1, default: 1 } },
+          {
+            in: 'query',
+            name: 'limit',
+            schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+          },
+          {
+            in: 'query',
+            name: 'search',
+            description: 'Case-insensitive match on master SKU or name',
+            schema: { type: 'string', maxLength: 100 },
+          },
+          {
+            in: 'query',
+            name: 'status',
+            description: 'Assignment status',
+            schema: { type: 'string', enum: ['all', 'active', 'inactive'], default: 'all' },
+          },
+          {
+            in: 'query',
+            name: 'stockStatus',
+            description: 'out_of_stock = 0, low = 1–10, in_stock = more than 10',
+            schema: {
+              type: 'string',
+              enum: ['all', 'out_of_stock', 'low', 'in_stock'],
+              default: 'all',
+            },
+          },
+          {
+            in: 'query',
+            name: 'sortBy',
+            schema: {
+              type: 'string',
+              enum: ['sku', 'name', 'stockQuantity', 'updatedAt'],
+              default: 'name',
+            },
+          },
+          {
+            in: 'query',
+            name: 'sortOrder',
+            schema: { type: 'string', enum: ['asc', 'desc'], default: 'asc' },
+          },
+        ],
+        responses: {
+          '200': {
+            description: 'Inventory page',
+            content: {
+              'application/json': responseEnvelope({
+                type: 'object',
+                required: ['items', 'pagination'],
+                properties: {
+                  items: { type: 'array', items: { $ref: '#/components/schemas/InventoryItem' } },
+                  pagination: { $ref: '#/components/schemas/Pagination' },
+                },
+              }),
+            },
+          },
+          '400': errorResponse('Invalid parameters', 'ValidationError'),
+          '401': errorResponse('Authentication required'),
+          '403': errorResponse('No access to this outlet'),
+          '404': errorResponse('Outlet not found'),
+        },
+      },
+    },
+    '/outlets/{outletId}/inventory/{menuItemId}': {
+      parameters: [outletIdParameter, menuItemIdParameter],
+      get: {
+        tags: ['Inventory'],
+        summary: 'Get the stock of one outlet menu item',
+        description:
+          'Looked up by the (outletId, menuItemId) pair. Staff with outlet access get 404 for unassigned or disabled items.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'Inventory item',
+            content: {
+              'application/json': responseEnvelope({
+                type: 'object',
+                required: ['inventoryItem'],
+                properties: { inventoryItem: { $ref: '#/components/schemas/InventoryItem' } },
+              }),
+            },
+          },
+          '400': errorResponse('Invalid ids', 'ValidationError'),
+          '401': errorResponse('Authentication required'),
+          '403': errorResponse('No access to this outlet'),
+          '404': errorResponse('Outlet or assignment not found'),
+        },
+      },
+    },
+    '/outlets/{outletId}/inventory/{menuItemId}/adjust': {
+      parameters: [outletIdParameter, menuItemIdParameter],
+      patch: {
+        tags: ['Inventory'],
+        summary: 'Adjust stock (HQ_ADMIN)',
+        description:
+          'Runs in one transaction: locks the acting admin (FOR SHARE), the outlet (FOR SHARE, must be active) and the assignment (FOR UPDATE), computes the new balance from the locked row, and updates only stock_quantity. Stock stays within 0–2147483647. INCREASE and DECREASE are not idempotent: do not resend after an ambiguous failure; re-read the stock first. SET is guarded by expectedStockQuantity. Inactive assignments and inactive master items can be corrected while the outlet is active.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                oneOf: [
+                  {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['operation', 'quantity'],
+                    properties: {
+                      operation: { type: 'string', enum: ['INCREASE', 'DECREASE'] },
+                      quantity: { type: 'integer', minimum: 1, maximum: 2147483647 },
+                    },
+                  },
+                  {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['operation', 'quantity', 'expectedStockQuantity'],
+                    properties: {
+                      operation: { type: 'string', enum: ['SET'] },
+                      quantity: { type: 'integer', minimum: 0, maximum: 2147483647 },
+                      expectedStockQuantity: {
+                        type: 'integer',
+                        minimum: 0,
+                        maximum: 2147483647,
+                        description: 'Stock the administrator saw; 409 STOCK_CHANGED if it differs',
+                      },
+                    },
+                  },
+                ],
+              },
+              examples: {
+                increase: { value: { operation: 'INCREASE', quantity: 20 } },
+                decrease: { value: { operation: 'DECREASE', quantity: 15 } },
+                set: { value: { operation: 'SET', quantity: 40, expectedStockQuantity: 50 } },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Adjusted (or unchanged for a SET to the same value)',
+            content: {
+              'application/json': responseEnvelope({
+                type: 'object',
+                required: [
+                  'inventoryItem',
+                  'operation',
+                  'previousStockQuantity',
+                  'newStockQuantity',
+                  'changed',
+                ],
+                properties: {
+                  inventoryItem: { $ref: '#/components/schemas/InventoryItem' },
+                  operation: { type: 'string', enum: ['INCREASE', 'DECREASE', 'SET'] },
+                  previousStockQuantity: { type: 'integer' },
+                  newStockQuantity: { type: 'integer' },
+                  changed: { type: 'boolean' },
+                },
+              }),
+            },
+          },
+          '404': errorResponse('Outlet or assignment not found'),
+          '409': errorResponse(
+            'Codes: OUTLET_INACTIVE, STOCK_CHANGED (stale expectedStockQuantity), INSUFFICIENT_STOCK, STOCK_LIMIT_EXCEEDED, CONCURRENT_UPDATE',
+          ),
           ...hqAdminErrors,
         },
       },
