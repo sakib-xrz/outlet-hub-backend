@@ -1003,7 +1003,7 @@ Result: **75/75 checks passed**, on two consecutive runs. This includes a check 
 - Five outlets: `DEMO-MIRPUR`, `DEMO-GULSHAN`, `DEMO-DHANMONDI`, `DEMO-UTTARA` (assigned items and stock, no sales) and `DEMO-BANANI` (historical sales, then deactivated).
 - 32 master items (2 retired), 115 assignments: inherited and override prices, one `0.00` override, 3 inactive assignments, and high, medium, low and zero stock.
 - Six `OUTLET_STAFF` accounts (`staff.*@example.com`).
-- 500 historical sales over the 30 days before the first seeding day.
+- 400 historical sales over the 30 days before the first seeding day. The plan was capped from 500 to 400 after 325 sales existed; those are kept, and the remaining 75 are spread evenly over the final days. The seed refuses to run if any demo sale lies outside the plan.
 
 **Safety and idempotency:**
 
@@ -1012,7 +1012,7 @@ Result: **75/75 checks passed**, on two consecutive runs. This includes a check 
 - Stock is replenished once, to the target balance plus the planned consumption, and never reset after sales exist.
 - Historical timestamps are applied only to sales created by the seed's own deterministic request ids.
 - Banani is deactivated only after all of its planned sales exist.
-- An interrupted run resumes where it stopped. This was tested by killing a run at 225/500 sales; the resumed run reached an identical end state.
+- An interrupted run resumes where it stopped. This was tested by killing a rehearsal run at 225 sales; the resumed run reached an identical end state.
 
 **Passwords:**
 

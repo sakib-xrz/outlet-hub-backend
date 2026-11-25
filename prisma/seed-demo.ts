@@ -24,6 +24,8 @@ const DAY_MS = 86_400_000;
 const DHAKA_OFFSET_HOURS = 6;
 const SALES_DAYS = 30;
 const BANANI_LAST_SALES_DAY = 11;
+const TARGET_SALES = 400;
+const CREATED_BEFORE_TARGET_CHANGE = 325;
 
 type OutletKey = 'MIRPUR' | 'GULSHAN' | 'DHANMONDI' | 'UTTARA' | 'BANANI';
 
@@ -527,6 +529,19 @@ function planSales(anchorDay: Date): PlannedSale[] {
   return plan.sort((a, b) => a.at.getTime() - b.at.getTime());
 }
 
+function limitPlan(full: PlannedSale[]): PlannedSale[] {
+  const keepTail = TARGET_SALES - CREATED_BEFORE_TARGET_CHANGE;
+  const tailLength = full.length - CREATED_BEFORE_TARGET_CHANGE;
+  return full.filter((_, index) => {
+    if (index < CREATED_BEFORE_TARGET_CHANGE) return true;
+    const offset = index - CREATED_BEFORE_TARGET_CHANGE;
+    return (
+      Math.floor(((offset + 1) * keepTail) / tailLength) !==
+      Math.floor((offset * keepTail) / tailLength)
+    );
+  });
+}
+
 function remainingStock(outlet: OutletKey, sku: string): number {
   const random = prng(`stock:${outlet}:${sku}`);
   const tier = pick(random, [
@@ -616,7 +631,25 @@ async function main(): Promise<void> {
     return id;
   };
 
-  const plan = planSales(anchorDay);
+  const plan = limitPlan(planSales(anchorDay));
+  if (plan.length !== TARGET_SALES)
+    throw new Error(`Demo plan has ${plan.length} sales, expected ${TARGET_SALES}`);
+  const planned = new Set(plan.map((sale) => sale.requestId));
+  const smokeHex = createHash('sha256')
+    .update('outlethub-demo:smoke-sale:staff.mirpur:1')
+    .digest('hex');
+  const smokeRequestId = `${smokeHex.slice(0, 8)}-${smokeHex.slice(8, 12)}-4${smokeHex.slice(13, 16)}-a${smokeHex.slice(17, 20)}-${smokeHex.slice(20, 32)}`;
+  const strays = await db.sale.count({
+    where: {
+      outlet: { code: { startsWith: 'DEMO-' } },
+      requestId: { notIn: [...planned, smokeRequestId] },
+    },
+  });
+  if (strays > 0) {
+    throw new Error(
+      `${strays} demo sales are not in the ${TARGET_SALES}-sale plan; refusing to continue.`,
+    );
+  }
   const consumption = new Map<string, number>();
   for (const sale of plan) {
     for (const line of sale.lines) {
