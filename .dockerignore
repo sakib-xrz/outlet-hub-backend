@@ -1,0 +1,16 @@
+node_modules
+dist
+coverage
+.git
+.husky
+.env
+.env.*
+!.env.example
+certs
+*.pem
+*.crt
+*.key
+tests
+docker-compose*.yml
+*.log
+.DS_Store

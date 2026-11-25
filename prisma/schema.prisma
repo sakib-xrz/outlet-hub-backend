@@ -1,0 +1,59 @@
+generator client {
+  provider               = "prisma-client"
+  output                 = "../src/generated/prisma"
+  runtime                = "nodejs"
+  moduleFormat           = "esm"
+  generatedFileExtension = "ts"
+  importFileExtension    = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  HQ_ADMIN
+  OUTLET_STAFF
+}
+
+enum SessionRevokeReason {
+  LOGOUT
+  ROTATED
+  REPLAY_DETECTED
+  ADMIN_REVOKED
+  EXPIRED
+}
+
+model User {
+  id           String           @id @default(uuid()) @db.Uuid
+  email        String           @unique @db.VarChar(320)
+  passwordHash String           @map("password_hash") @db.VarChar(255)
+  role         Role
+  isActive     Boolean          @default(true) @map("is_active")
+  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  sessions     RefreshSession[]
+
+  @@index([isActive])
+  @@map("users")
+}
+
+model RefreshSession {
+  id           String               @id @default(uuid()) @db.Uuid
+  familyId     String               @map("family_id") @db.Uuid
+  tokenHash    String               @unique @map("token_hash") @db.Char(64)
+  userId       String               @map("user_id") @db.Uuid
+  expiresAt    DateTime             @map("expires_at") @db.Timestamptz(3)
+  revokedAt    DateTime?            @map("revoked_at") @db.Timestamptz(3)
+  revokeReason SessionRevokeReason? @map("revoke_reason")
+  userAgent    String?              @map("user_agent") @db.VarChar(512)
+  ipAddress    String?              @map("ip_address") @db.Inet
+  createdAt    DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastUsedAt   DateTime?            @map("last_used_at") @db.Timestamptz(3)
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_sessions")
+}

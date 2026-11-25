@@ -1,0 +1,28 @@
+name: outlet-hub
+
+services:
+  api:
+    build:
+      context: .
+      target: production
+    image: outlet-hub-backend:latest
+    restart: unless-stopped
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      NODE_ENV: production
+      PORT: ${PORT:-3000}
+    ports:
+      - '127.0.0.1:${API_PORT:-3000}:${PORT:-3000}'
+    stop_grace_period: 15s
+
+  migrate:
+    profiles: [migrate]
+    build:
+      context: .
+      target: migrate
+    env_file:
+      - path: .env.production
+        required: false
+    restart: 'no'

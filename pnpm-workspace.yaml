@@ -1,0 +1,27 @@
+packages:
+  - .
+
+minimumReleaseAge: 1440
+minimumReleaseAgeExclude:
+  - '@types/body-parser'
+  - '@types/estree'
+  - '@types/node'
+  - '@types/react'
+  - '@vitest/coverage-v8'
+  - '@vitest/mocker'
+  - '@vitest/spy'
+  - fast-copy
+  - ignore
+  - tinyexec
+  - tsc-alias
+  - vitest
+
+overrides:
+  effect: 3.22.1
+
+allowBuilds:
+  '@prisma/engines': true
+  '@scarf/scarf': false
+  argon2: true
+  esbuild: true
+  prisma: true
