@@ -66,7 +66,7 @@ OutletHub records sales; it does not process payments.
 - Argon2id passwords, HS256 JWT access tokens, opaque rotating refresh tokens
 - Pino structured logging, Helmet, strict CORS/origin checks, layered rate limits
 - OpenAPI 3 and development-only Swagger UI
-- Vitest, Supertest, ESLint, Prettier, Husky, lint-staged, Commitlint (Conventional Commits)
+- Vitest, Supertest, ESLint, Prettier, Husky, lint-staged, Commitlint
 - Multi-stage Dockerfile and an application-only Docker Compose file, deployed via Coolify
 
 ### Shared database (intentional, assessment only)
@@ -351,7 +351,7 @@ The API Compose file always runs with `NODE_ENV=production`, which requires `COO
 | `pnpm db:seed:demo`                 | Idempotent demo data in the configured database (**writes**)   |
 | `pnpm db:audit`                     | Read-only counts and integrity checks                          |
 
-There is no external CI. Coolify builds from Git. Husky runs lint-staged on commit and enforces Conventional Commits. Run `pnpm verify && pnpm security:audit` before pushing.
+There is no external CI. Coolify builds from Git. Husky runs lint-staged on commit and enforces the commit message style (an imperative, sentence-case subject such as "Add inventory API", max 120 chars). Run `pnpm verify && pnpm security:audit` before pushing.
 
 ## API Endpoints
 
