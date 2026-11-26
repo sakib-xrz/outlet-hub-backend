@@ -20,7 +20,45 @@ OutletHub records sales; it does not process payments.
 - [docs/VERIFICATION.md](docs/VERIFICATION.md): every executed check and its result.
 - [erd-diagram.pdf](erd-diagram.pdf) and [flowchart-diagram.pdf](flowchart-diagram.pdf).
 
-## Stack
+## Table of contents
+
+- [Setup](#setup)
+  - [Stack](#stack)
+  - [Shared database (intentional, assessment only)](#shared-database-intentional-assessment-only)
+  - [Environments](#environments)
+  - [Local development](#local-development)
+  - [Database migrations and seed](#database-migrations-and-seed)
+  - [Demo data (configured database)](#demo-data-configured-database)
+  - [Docker (application only)](#docker-application-only)
+  - [Full stack with Docker (API + frontend, external database)](#full-stack-with-docker-api--frontend-external-database)
+  - [Coolify deployment](#coolify-deployment)
+  - [Commands](#commands)
+- [API Endpoints](#api-endpoints)
+  - [Authentication API](#authentication-api)
+  - [Outlets API](#outlets-api)
+  - [Staff API](#staff-api)
+  - [Master Menu API](#master-menu-api)
+  - [Outlet Menu API](#outlet-menu-api)
+  - [Inventory API](#inventory-api)
+  - [Sales API (POS and receipts)](#sales-api-pos-and-receipts)
+  - [Reports API (HQ_ADMIN only)](#reports-api-hq_admin-only)
+- [Database Schema](#database-schema)
+- [Architecture](#architecture)
+- [Scaling Strategy](#scaling-strategy)
+  - [a. Database scaling](#a-database-scaling)
+  - [b. Reporting performance](#b-reporting-performance)
+  - [c. Infrastructure](#c-infrastructure)
+  - [d. Architectural evolution](#d-architectural-evolution)
+  - [Microservices evolution (summary)](#microservices-evolution-summary)
+  - [Offline POS & KDS (summary)](#offline-pos--kds-summary)
+- [Verification](#verification)
+  - [API integration verification (real HTTP, real PostgreSQL)](#api-integration-verification-real-http-real-postgresql)
+- [Known limitations](#known-limitations)
+- [Security considerations](#security-considerations)
+
+## Setup
+
+### Stack
 
 - Node.js 24 LTS, Express 5, strict TypeScript, pnpm
 - External PostgreSQL (Coolify-managed), Prisma ORM 7 with the `pg` driver adapter
@@ -31,41 +69,7 @@ OutletHub records sales; it does not process payments.
 - Vitest, Supertest, ESLint, Prettier, Husky, lint-staged, Commitlint (Conventional Commits)
 - Multi-stage Dockerfile and an application-only Docker Compose file, deployed via Coolify
 
-## Architecture
-
-The codebase is a feature-based modular monolith with explicit layers:
-
-```text
-src/
-├── common/                 # framework-neutral errors, types, and utilities
-├── config/                 # env-file loading, validated configuration, logging
-├── database/               # Prisma client factory and connection pool
-├── docs/                   # implemented-endpoint OpenAPI contract
-├── generated/prisma/       # generated; ignored and recreated during install/build
-├── middlewares/            # HTTP cross-cutting concerns
-├── modules/
-│   ├── access/             # outlet-access checks (membership, HQ scope)
-│   ├── auth/               # routes → controller → service → repository
-│   ├── health/             # liveness and readiness
-│   ├── inventory/          # outlet stock balances and adjustments
-│   ├── menu-items/         # master menu (HQ only)
-│   ├── outlet-menu-items/  # outlet menu assignments and price overrides
-│   ├── outlets/            # outlet management
-│   ├── sales/              # POS sales, receipts, idempotency
-│   └── staff/              # staff accounts and outlet memberships
-├── routes/                 # versioned route composition
-├── app.ts                  # side-effect-free Express factory
-└── server.ts               # process and server lifecycle
-prisma/
-├── migrations/             # immutable SQL migration history
-├── schema.prisma           # full domain schema (later phases use more of it)
-└── seed.ts                 # explicitly invoked HQ administrator seed
-tests/unit/                 # database-independent unit tests
-```
-
-Controllers only translate HTTP input/output. Services own authentication orchestration without Express types. Repositories own Prisma access and transactional refresh rotation. Prisma's interactive transaction client is used internally with `Serializable` isolation.
-
-## Shared database (intentional, assessment only)
+### Shared database (intentional, assessment only)
 
 There are no real users, so **local development and production intentionally connect to the same Coolify-managed PostgreSQL database**. No database runs in Docker, and there is no separate test database.
 
@@ -79,7 +83,7 @@ Consequences to keep in mind:
 
 For a real product, use separate databases per environment, least-privilege roles (a runtime role without DDL rights, a separate migration role), and backups with tested restores.
 
-## Environments
+### Environments
 
 Only two deployment environments exist: `development` and `production`.
 
@@ -123,7 +127,7 @@ All configuration is validated by Zod before startup. Invalid or unsafe combinat
 
 Never commit real env files. If a secret is exposed, rotate it. Removing it from Git history is not enough.
 
-## Local development
+### Local development
 
 Requirements: Node.js 24 LTS and pnpm 12. No local PostgreSQL or Docker is needed.
 
@@ -137,7 +141,7 @@ pnpm dev
 
 The API listens on `http://localhost:3000`. Swagger UI is at `/docs` when `SWAGGER_ENABLED=true` outside production. The OpenAPI document is at `/openapi.json`.
 
-### Connecting securely to the Coolify PostgreSQL
+#### Connecting securely to the Coolify PostgreSQL
 
 SSL is configured only through standard `DATABASE_URL` parameters (`sslmode`, `sslrootcert`). Both the API (node-postgres) and the Prisma CLI read them.
 
@@ -161,7 +165,7 @@ DATABASE_URL=postgresql://<user>:<password>@<vps-ip>:<public-port>/<db>?schema=p
 
 Use an absolute `sslrootcert` path. node-postgres treats `sslmode=require` as `verify-full`, so the certificate must match the host you connect to. If you connect by IP and the certificate does not include it, add `uselibpqcompat=true`. The CA is still verified, but the hostname is not. Option A avoids this entirely.
 
-## Database migrations and seed
+### Database migrations and seed
 
 The schema is managed only through committed SQL migrations in `prisma/migrations/`. Nothing runs migrations or seeds automatically: not app startup, not the Docker build, not tests.
 
@@ -209,7 +213,198 @@ ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='long-unique-secret' pnpm db:seed:a
 
 The seed is idempotent for the normalized email and intentionally resets that account's password and role. It never logs the password.
 
-## Authentication API
+### Demo data (configured database)
+
+`pnpm db:seed:demo` (`prisma/seed-demo.ts`) seeds realistic demonstration data into the **configured** database through the production services. Outlets go through the outlet + receipt-counter transaction, staff through Argon2id hashing, assignments, stock through the guarded adjustment, and every sale through `SaleService.create`.
+
+**What it creates:**
+
+- Five outlets: `DEMO-MIRPUR`, `DEMO-GULSHAN`, `DEMO-DHANMONDI`, `DEMO-UTTARA` (assigned items and stock, no sales) and `DEMO-BANANI` (historical sales, then deactivated).
+- 32 master items (2 retired), 115 assignments: inherited and override prices, one `0.00` override, 3 inactive assignments, and high, medium, low and zero stock.
+- Six `OUTLET_STAFF` accounts (`staff.*@example.com`).
+- 400 historical sales over the 30 days before the first seeding day. The plan was capped from 500 to 400 after 325 sales existed; those are kept, and the remaining 75 are spread evenly over the final days. The seed refuses to run if any demo sale lies outside the plan.
+
+**Safety and idempotency:**
+
+- Everything is namespaced (`DEMO-` codes and SKUs). The seed refuses to touch a same-named record that is not demo data.
+- Sales use deterministic request ids. The plan is anchored to the demo Mirpur outlet's creation day, so re-runs reproduce the same plan.
+- Stock is replenished once, to the target balance plus the planned consumption, and never reset after sales exist.
+- Historical timestamps are applied only to sales created by the seed's own deterministic request ids.
+- Banani is deactivated only after all of its planned sales exist.
+- An interrupted run resumes where it stopped. This was tested by killing a rehearsal run at 225 sales; the resumed run reached an identical end state.
+
+**Passwords:**
+
+- New accounts get random passwords. They are printed once and, with `DEMO_CREDENTIALS_FILE=<path>`, written to a `0600` file outside the repository.
+- Re-runs never rotate them. `pnpm db:seed:demo --rotate-demo-passwords` explicitly issues new passwords for the demo staff accounts only.
+- Passwords are never stored in source or docs.
+
+`pnpm db:audit` is read-only. It prints counts, integrity checks (separately for demo and existing data) and business figures for the configured database.
+
+### Docker (application only)
+
+The Dockerfile has these stages:
+
+- `production` (default runtime): non-root `nodeapp` user, production dependencies only, a `HEALTHCHECK` on `/api/v1/health/live` that respects `PORT`.
+- `migrate`: a one-off `prisma migrate deploy` job.
+
+Env files are excluded by `.dockerignore`, so no credentials are copied into any image.
+
+```bash
+cp .env.example .env.production      # NODE_ENV=production, COOKIE_SECURE=true, real secrets
+docker compose config --quiet        # validate
+docker compose up -d --build         # API on 127.0.0.1:${API_PORT:-3000}
+docker compose ps
+docker compose down
+```
+
+Compose has **no database service, by design**. The database is the external Coolify-managed PostgreSQL and stays outside Docker; point `DATABASE_URL` at it. Compose reads `.env.production` at runtime and publishes the API on loopback only. The `migrate` service is behind the `migrate` profile and never starts with `up`.
+
+### Full stack with Docker (API + frontend, external database)
+
+Both applications have their own Compose file. The database is **intentionally external**: the Coolify-managed PostgreSQL is not containerized, and neither Compose file contains a database service.
+
+| Repository                                                              | Compose service                             | Published on                  |
+| ----------------------------------------------------------------------- | ------------------------------------------- | ----------------------------- |
+| [outlet-hub-backend](https://github.com/sakib-xrz/outlet-hub-backend)   | `api` (plus the optional `migrate` profile) | `127.0.0.1:${API_PORT:-3000}` |
+| [outlet-hub-frontend](https://github.com/sakib-xrz/outlet-hub-frontend) | `web` (nginx serving the built SPA)         | `127.0.0.1:${WEB_PORT:-8080}` |
+
+**1. API.** In this repository, create `.env.production`. Use placeholders here; put real secrets only in that ignored file.
+
+```dotenv
+NODE_ENV=production
+DATABASE_URL=postgresql://<user>:<password>@<host>:5432/<database>?sslmode=require
+JWT_SECRET=<at least 32 random characters>
+ALLOWED_ORIGINS=http://localhost:8080      # must equal the web origin exactly
+COOKIE_SECURE=true                         # required in production; browsers accept it on http://localhost
+COOKIE_SAME_SITE=strict
+TRUST_PROXY=0                              # 1 behind Coolify/Traefik
+```
+
+```bash
+docker compose up -d --build               # API on http://localhost:3000
+```
+
+**2. Frontend.** In the frontend repository:
+
+```bash
+VITE_API_BASE_URL=http://localhost:3000/api/v1 docker compose up -d --build   # SPA on http://localhost:8080
+```
+
+**3. The three values must agree:**
+
+- `VITE_API_BASE_URL` (frontend, build time) must point at the API, including `/api/v1`. Its origin is also written into the SPA's CSP `connect-src`.
+- `ALLOWED_ORIGINS` (API, runtime) must contain the SPA's exact origin, for example `http://localhost:8080`. Otherwise CORS and the cookie endpoints refuse the browser.
+- `localhost:8080` and `localhost:3000` are the same site, so the `SameSite=Strict` refresh cookie works locally. In production, put the two on subdomains of one registrable domain, use HTTPS and set `COOKIE_SECURE=true`.
+
+The API Compose file always runs with `NODE_ENV=production`, which requires `COOKIE_SECURE=true`. That still works over plain HTTP on `localhost`, because browsers treat `http://localhost` as a secure context. On any other host, put both apps behind HTTPS.
+
+### Coolify deployment
+
+1. **Database:** create the PostgreSQL resource in Coolify. Copy its **internal** connection URL for the API, since the API runs on the same server. Use the public URL only for local access (see above).
+2. **Application:** add a resource from the Git repository. Use build pack **Dockerfile**, base directory `/` (this repository's root), and Dockerfile `Dockerfile` (the final stage, `production`, is the default target). Set the port to `3000`, or whatever `PORT` you set.
+3. **Domain/HTTPS:** assign the domain (for example `https://api.example.com`). Coolify's Traefik proxy gets the certificate and terminates TLS. It forwards `X-Forwarded-Proto` and `X-Forwarded-For`.
+4. **Environment variables** (runtime, not build-time). Mark secrets as secret:
+
+   ```dotenv
+   NODE_ENV=production
+   DATABASE_URL=<internal Coolify URL>
+   DATABASE_POOL_MAX=5
+   JWT_SECRET=<≥32 random chars, e.g. `openssl rand -base64 48`>
+   JWT_ISSUER=outlet-hub
+   JWT_AUDIENCE=outlet-hub-web
+   ALLOWED_ORIGINS=https://<frontend-domain>
+   TRUST_PROXY=1
+   COOKIE_SECURE=true
+   COOKIE_SAME_SITE=strict      # use `none` only if the frontend is on a different site
+   LOG_LEVEL=info
+   LOG_PRETTY=false
+   SWAGGER_ENABLED=false
+   ```
+
+5. **Health check:** the image's Docker `HEALTHCHECK` is used automatically. If you configure Coolify's own check, use path `/api/v1/health/live`. Use `/api/v1/health/ready` for database readiness monitoring.
+6. **Migrations:** apply pending migrations explicitly _before_ deploying code that needs them (`pnpm db:migrate:deploy` from a trusted machine). Deployments never migrate automatically.
+
+`TRUST_PROXY=1` makes the client IP (used for rate limiting) and the request protocol (used for Secure cookies) come from exactly one trusted hop, Coolify's proxy. Do not set it higher unless another proxy, such as Cloudflare, sits in front.
+
+### Commands
+
+| Command                             | Action                                                         |
+| ----------------------------------- | -------------------------------------------------------------- |
+| `pnpm dev`                          | Watch-mode server (`.env.development`)                         |
+| `pnpm build` / `pnpm start`         | Compile / run compiled output                                  |
+| `pnpm typecheck`                    | Strict TypeScript validation                                   |
+| `pnpm lint` / `pnpm lint:fix`       | ESLint validation / fix                                        |
+| `pnpm format:check` / `pnpm format` | Prettier validation / fix                                      |
+| `pnpm test` / `pnpm test:watch`     | Database-independent unit tests                                |
+| `pnpm test:coverage`                | Coverage report                                                |
+| `pnpm verify`                       | Lint, typecheck, format check, tests, and build                |
+| `pnpm security:audit`               | High-severity production dependency audit                      |
+| `pnpm prisma:generate`              | Generate the typed Prisma client                               |
+| `pnpm db:migrate:diff`              | Read-only: print SQL from the live DB to `schema.prisma`       |
+| `pnpm db:migrate:status`            | Read-only: show applied/pending migrations                     |
+| `pnpm db:migrate:deploy`            | Apply committed migrations (**writes to the shared database**) |
+| `pnpm db:seed:admin`                | Explicitly seed/rotate the HQ admin (**writes**)               |
+| `pnpm verify:sales-concurrency`     | Concurrency scenarios on a **local disposable** database only  |
+| `pnpm verify:reports`               | Report fixtures and checks on a **local disposable** database  |
+| `pnpm verify:api`                   | Full HTTP business flow on a **local disposable** database     |
+| `pnpm db:seed:demo`                 | Idempotent demo data in the configured database (**writes**)   |
+| `pnpm db:audit`                     | Read-only counts and integrity checks                          |
+
+There is no external CI. Coolify builds from Git. Husky runs lint-staged on commit and enforces Conventional Commits. Run `pnpm verify && pnpm security:audit` before pushing.
+
+## API Endpoints
+
+All paths are under `/api/v1`. Every response uses the envelope `{ success, message, data }`; errors use `{ success: false, message, code, requestId, errors? }`. Full request and response schemas are in `/openapi.json` and in Swagger UI (`/docs`, development only).
+
+"Member staff" means `OUTLET_STAFF` with an active membership of that outlet, and the outlet must be active. Other staff get `403`, so the API does not reveal whether an outlet exists.
+
+| Method  | Path                                               | Role / access                                                | Purpose                                                                       |
+| ------- | -------------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| `POST`  | `/auth/login`                                      | Public; trusted `Origin`; rate-limited                       | Sign in; returns an access token and sets the refresh cookie                  |
+| `POST`  | `/auth/refresh`                                    | Refresh cookie; trusted `Origin`; rate-limited               | Rotate the refresh token and issue a new access token                         |
+| `POST`  | `/auth/logout`                                     | Refresh cookie; trusted `Origin`                             | Revoke the session and clear the cookie                                       |
+| `GET`   | `/auth/me`                                         | Any authenticated user                                       | Current user                                                                  |
+| `GET`   | `/outlets`                                         | Any authenticated user (staff see only their active outlets) | List, search, filter and sort outlets                                         |
+| `POST`  | `/outlets`                                         | `HQ_ADMIN`                                                   | Create an outlet and its receipt counter in one transaction                   |
+| `GET`   | `/outlets/:outletId`                               | `HQ_ADMIN` or member staff                                   | Outlet details                                                                |
+| `PATCH` | `/outlets/:outletId`                               | `HQ_ADMIN`                                                   | Update name or address (the code is immutable)                                |
+| `PATCH` | `/outlets/:outletId/status`                        | `HQ_ADMIN`                                                   | Activate or deactivate an outlet                                              |
+| `GET`   | `/staff`                                           | `HQ_ADMIN`                                                   | List staff accounts                                                           |
+| `POST`  | `/staff`                                           | `HQ_ADMIN`                                                   | Create an `OUTLET_STAFF` account with outlet memberships                      |
+| `GET`   | `/staff/:staffId`                                  | `HQ_ADMIN`                                                   | Staff details and memberships                                                 |
+| `PATCH` | `/staff/:staffId`                                  | `HQ_ADMIN`                                                   | Change the email                                                              |
+| `PATCH` | `/staff/:staffId/status`                           | `HQ_ADMIN`                                                   | Activate or deactivate (revokes sessions)                                     |
+| `PUT`   | `/staff/:staffId/outlets`                          | `HQ_ADMIN`                                                   | Replace the outlet memberships                                                |
+| `PATCH` | `/staff/:staffId/password`                         | `HQ_ADMIN`; rate-limited                                     | Reset the password (revokes sessions)                                         |
+| `GET`   | `/menu-items`                                      | `HQ_ADMIN`                                                   | List the master menu                                                          |
+| `POST`  | `/menu-items`                                      | `HQ_ADMIN`                                                   | Create a master menu item                                                     |
+| `GET`   | `/menu-items/:menuItemId`                          | `HQ_ADMIN`                                                   | Master item details                                                           |
+| `PATCH` | `/menu-items/:menuItemId`                          | `HQ_ADMIN`                                                   | Update name, description or base price                                        |
+| `PATCH` | `/menu-items/:menuItemId/status`                   | `HQ_ADMIN`                                                   | Activate or deactivate a master item                                          |
+| `GET`   | `/outlets/:outletId/menu-items`                    | `HQ_ADMIN` or member staff (staff see enabled items only)    | Outlet menu with effective price and stock                                    |
+| `POST`  | `/outlets/:outletId/menu-items`                    | `HQ_ADMIN`                                                   | Assign a master item, optionally with an override price                       |
+| `GET`   | `/outlets/:outletId/menu-items/:menuItemId`        | `HQ_ADMIN` or member staff                                   | One assignment                                                                |
+| `PATCH` | `/outlets/:outletId/menu-items/:menuItemId/price`  | `HQ_ADMIN`                                                   | Set or clear the override price                                               |
+| `PATCH` | `/outlets/:outletId/menu-items/:menuItemId/status` | `HQ_ADMIN`                                                   | Enable or disable the assignment                                              |
+| `GET`   | `/outlets/:outletId/inventory`                     | `HQ_ADMIN` or member staff                                   | Stock balances, filterable by stock level                                     |
+| `GET`   | `/outlets/:outletId/inventory/:menuItemId`         | `HQ_ADMIN` or member staff                                   | One stock balance                                                             |
+| `PATCH` | `/outlets/:outletId/inventory/:menuItemId/adjust`  | `HQ_ADMIN`                                                   | `INCREASE`, `DECREASE` or `SET` (with the expected quantity) under a row lock |
+| `POST`  | `/outlets/:outletId/sales`                         | Member `OUTLET_STAFF`                                        | Create a sale (idempotent by request id; 201 new, 200 replay)                 |
+| `GET`   | `/outlets/:outletId/sales`                         | `HQ_ADMIN` or member staff                                   | Sales history (search, sort, half-open date range)                            |
+| `GET`   | `/outlets/:outletId/sales/by-request/:requestId`   | Member `OUTLET_STAFF`                                        | Resolve an uncertain checkout by its request id                               |
+| `GET`   | `/outlets/:outletId/sales/:saleId`                 | `HQ_ADMIN` or member staff                                   | Receipt and sale details                                                      |
+| `GET`   | `/reports/summary`                                 | `HQ_ADMIN`                                                   | Revenue, sale count, units sold and outlet counts                             |
+| `GET`   | `/reports/revenue-by-outlet`                       | `HQ_ADMIN`                                                   | Paginated revenue per outlet, including zero-sale and inactive outlets        |
+| `GET`   | `/reports/outlets/:outletId/top-selling-items`     | `HQ_ADMIN`                                                   | Top five items of one outlet by quantity                                      |
+| `GET`   | `/health/live`                                     | Public                                                       | Process liveness (no database dependency)                                     |
+| `GET`   | `/health/ready`                                    | Public                                                       | Readiness, including a database ping with a timeout                           |
+
+Outside `/api/v1`, `GET /openapi.json` serves the OpenAPI document. Swagger UI is mounted at `/docs` only when `SWAGGER_ENABLED=true` outside production.
+
+The sections below describe each module in detail.
+
+### Authentication API
 
 Base path: `/api/v1`.
 
@@ -253,7 +448,7 @@ Errors follow:
 }
 ```
 
-## Outlets API
+### Outlets API
 
 All endpoints are under `/api/v1/outlets`, require `Authorization: Bearer <token>`, and use the standard response envelope. Full schemas are in `/openapi.json` and in Swagger UI (development only).
 
@@ -328,7 +523,7 @@ All endpoints are under `/api/v1/outlets`, require `Authorization: Bearer <token
 - `tests/unit/outlet-repository.test.ts` covers query shape and the creation transaction.
 - These tests use mocked stores and a fake Prisma client. They verify the _orchestration_ (same transaction client, failures propagate), not real PostgreSQL atomicity. That is covered by the manual check below.
 
-### Manual database check (run only with approval; it writes to the shared database)
+#### Manual database check (run only with approval; it writes to the shared database)
 
 1. Start the API and sign in as an HQ admin to get an access token.
 2. `POST /outlets {"code":" smoke-01 ","name":"Smoke"}` → 201 with code `SMOKE-01`. Then run `SELECT last_number FROM receipt_counters WHERE outlet_id = '<id>'` and confirm it is `0`.
@@ -338,7 +533,7 @@ All endpoints are under `/api/v1/outlets`, require `Authorization: Bearer <token
 6. `PATCH /outlets/<id> {"code":"X-1"}` returns 400, and the code is unchanged.
 7. Optional rollback check, only on a throwaway database: drop the counter table's write permission for the API role (`REVOKE INSERT ON receipt_counters FROM <role>`). `POST /outlets` should then return 500 with no new row in `outlets`. Restore the permission afterwards.
 
-## Staff API
+### Staff API
 
 All endpoints are under `/api/v1/staff`. Every endpoint requires a bearer token and the `HQ_ADMIN` role. They only ever read or change `OUTLET_STAFF` accounts: an HQ administrator's id returns 404, exactly like a missing account.
 
@@ -375,7 +570,7 @@ All endpoints are under `/api/v1/staff`. Every endpoint requires a bearer token 
 - **`outletIds`:** UUIDs, unique, at most 200.
 - **Bodies are strict.** `role`, `isActive` (outside `/status`), `passwordHash`, ids and timestamps are rejected, not ignored, so a client can't escalate a role.
 
-### Account and membership lifecycle
+#### Account and membership lifecycle
 
 - **Create:**
   - The password is hashed with Argon2id (`common/security/password.ts`, shared with login and the admin seed) **before** the transaction opens.
@@ -405,7 +600,7 @@ All endpoints are under `/api/v1/staff`. Every endpoint requires a bearer token 
   - **Access tokens already issued stay valid until they expire (up to 15 minutes).** The account is still active, so `authenticate` accepts them. This is the documented limit of stateless JWTs in this design.
 - **Hard deletion:** none. Historical sales keep their `created_by_id`.
 
-### Concurrency between account changes and authentication
+#### Concurrency between account changes and authentication
 
 Login and refresh now take the same user-row lock that account changes take, so a stale credential cannot create a session after a reset or deactivation.
 
@@ -421,7 +616,7 @@ Login and refresh now take the same user-row lock that account changes take, so 
 - **Testing:** the mocked tests check the orchestration (lock order, re-checks, rollback propagation). They do **not** prove PostgreSQL atomicity or lock behavior; the manual check below covers that.
 - **Logs:** request bodies are never logged by `pino-http`, and the redaction list additionally covers `req.body`, `*.password` and `*.newPassword`.
 
-### Manual database check (run only with approval; it writes to the shared database)
+#### Manual database check (run only with approval; it writes to the shared database)
 
 1. As an HQ admin, `POST /staff` with an active outlet's id. Confirm the 201 response contains no password fields, and that `SELECT password_hash FROM users WHERE email = …` starts with `$argon2id$`.
 2. Repeat with the same email → 409. Repeat with an inactive outlet → 400, and no user row is created.
@@ -431,7 +626,7 @@ Login and refresh now take the same user-row lock that account changes take, so 
 6. `PUT /staff/:id/outlets` with a set that keeps one outlet, drops one and adds one. The kept row's `created_at` is unchanged.
 7. Race check: start a login with the old password and a password reset at the same moment (two terminals). Afterwards, no unrevoked session may exist with a `created_at` earlier than the reset.
 
-## Master Menu API
+### Master Menu API
 
 All endpoints are under `/api/v1/menu-items` and require `HQ_ADMIN`. Outlet staff get 403; they will read outlet-specific assigned items from a phase 4 endpoint, never the global catalog.
 
@@ -461,7 +656,7 @@ All endpoints are under `/api/v1/menu-items` and require `HQ_ADMIN`. Outlet staf
 - **Price changes:** `PATCH` writes only `menu_items` columns. Outlet `override_price`, stock, and the `unit_price`/`item_name` snapshots on `sale_items` are separate rows and are never touched.
 - **Status changes:** a conditional `UPDATE … WHERE id = $1 AND is_active <> $2`. Repeating the current status changes nothing (not even `updatedAt`), and two concurrent toggles can't interleave. Assignments, stock, overrides and sales are preserved. There is no hard delete.
 
-### Money contract
+#### Money contract
 
 - **Format:** money is a JSON **string** matching `^(0|[1-9]\d{0,9})(\.\d{1,2})?$`, so 0 to `9999999999.99` (the `DECIMAL(12,2)` range).
 - **Rejected:** JSON numbers, negative values, `NaN`, `Infinity`, exponents, leading zeros or `+`, more than 2 decimals (never rounded silently), and values out of range.
@@ -477,7 +672,7 @@ All endpoints are under `/api/v1/menu-items` and require `HQ_ADMIN`. Outlet staf
 - The API never writes NaN. As defence in depth, `20261126000000_money_not_nan` adds `<> 'NaN'::numeric` checks to `menu_items.base_price`, `outlet_menu_items.override_price`, `sales.total_amount`, `sale_items.unit_price` and `sale_items.line_total`.
 - It is applied to the configured database. All five constraints are present and validated, and no NaN values exist; `pnpm db:audit` re-checks this. On a new database it is applied by `pnpm db:migrate:deploy` with the rest of the history. It would fail if a NaN value already existed.
 
-### Rules for future outlet pricing and sales
+#### Rules for future outlet pricing and sales
 
 - **Effective price:** `outlet_menu_items.override_price` when it is not null, otherwise `menu_items.base_price`.
 - **Sellable only when all are active:** the outlet, the outlet assignment (`outlet_menu_items.is_active`) and the master item (`menu_items.is_active`). An inactive master item is never sellable, even if its assignment is active.
@@ -491,7 +686,7 @@ All endpoints are under `/api/v1/menu-items` and require `HQ_ADMIN`. Outlet staf
 - `tests/unit/menu-item-repository.test.ts` covers query shape, exact-string persistence, scalar-only updates and the conditional status update.
 - These run against a mocked Prisma client and do not prove PostgreSQL behavior.
 
-### Manual database check (run only with approval; it writes to the shared database)
+#### Manual database check (run only with approval; it writes to the shared database)
 
 1. `POST /menu-items {"sku":" coffee-001 ","name":"Cappuccino","basePrice":"180.5"}` → 201 with `sku: "COFFEE-001"` and `basePrice: "180.50"`. In SQL, `base_price` is `180.50`.
 2. Send the same request twice in parallel: one 201 and one 409 on `body.sku`.
@@ -499,7 +694,7 @@ All endpoints are under `/api/v1/menu-items` and require `HQ_ADMIN`. Outlet staf
 4. `PATCH /menu-items/:id/status {"isActive":false}` twice. `updated_at` changes once. Any `outlet_menu_items` rows for the item keep `is_active`, `stock_quantity` and `override_price`.
 5. Sign in as staff: `GET /menu-items` → 403.
 
-## Outlet Menu API
+### Outlet Menu API
 
 Endpoints are nested under an outlet: `/api/v1/outlets/:outletId/menu-items`. An assignment is identified by the **pair** `(outletId, menuItemId)`, the table's composite primary key. It is never looked up by `menuItemId` alone.
 
@@ -523,13 +718,13 @@ The router is mounted before the outlets router (`mergeParams`), so these paths 
 - **Status flags:** `isActive` (the assignment), `outletIsActive`, `menuItemIsActive`, `isEnabled` and `isSellable`.
 - **Timestamps:** `createdAt`, `updatedAt` (of the assignment).
 
-### Pricing
+#### Pricing
 
 - `effectivePrice = overridePrice ?? basePrice`, computed with nullish coalescing on `Decimal` values. `"0.00"` is therefore a real override, and only `null` falls back. The effective price is computed per response and never stored.
 - `PATCH …/price {"overridePrice": null}` restores inheritance: later master `basePrice` changes then apply to this outlet automatically. A non-null override applies only to this outlet.
 - Prices use the same money contract as the master menu (`src/common/money.ts`).
 
-### Availability
+#### Availability
 
 - `isEnabled = outletIsActive && menuItemIsActive && isActive`.
 - `isSellable = isEnabled && stockQuantity > 0`.
@@ -538,14 +733,14 @@ The router is mounted before the outlets router (`mergeParams`), so these paths 
   - Enabled items with zero stock are included, so the UI can show "Out of stock".
   - Disabled or unassigned items return 404 on the detail endpoint and never appear in lists.
 
-### Listing
+#### Listing
 
 - Same `page`/`limit` contract as other lists.
 - `search` matches the master SKU or name.
 - `status` filters by assignment status.
 - `sortBy` is `sku`, `name`, `createdAt` or `updatedAt`, with `menuItemId` as the tie-breaker. Sorting by effective price is not offered, because it can't be done in the database before pagination without a computed column.
 
-### Assignment lifecycle
+#### Assignment lifecycle
 
 - **Assign:** needs an active outlet and an active master item. The assignment starts with `stockQuantity = 0` and `isActive = true`, and `overridePrice` defaults to `null`. Bodies are strict: stock, status, effective price, `outletId` and timestamps are rejected.
 - **One assignment per outlet and item:** an existing assignment returns 409 on `body.menuItemId`. An inactive one tells the admin to reactivate it instead. A concurrent duplicate insert hits the composite key (P2002 → 409).
@@ -556,7 +751,7 @@ The router is mounted before the outlets router (`mergeParams`), so these paths 
 - **Never touched:** nothing is hard-deleted, stock is never written, the master item is never written, and `sale_items` are never touched.
 - **No automatic assignments:** creating a master item assigns it nowhere.
 
-### Locking and the global lock order
+#### Locking and the global lock order
 
 Every transaction that writes these tables takes row locks in this order. It is consistent with the auth and staff paths from earlier phases.
 
@@ -602,7 +797,7 @@ users  →  outlets  →  receipt_counters  →  outlet_menu_items (by menu_item
   - parent-status rules, idempotent status, and that stock and master rows are never written.
 - These use a mocked Prisma client and **do not prove PostgreSQL locking or atomicity**.
 
-### Manual database check (run only with approval; it writes to the shared database)
+#### Manual database check (run only with approval; it writes to the shared database)
 
 1. Create (or reuse) an active outlet and an active master item. Then `POST /outlets/:o/menu-items {"menuItemId": "…"}` → 201 with `stockQuantity: 0`, `priceSource: "BASE"`, and `effectivePrice` equal to `basePrice`.
 2. Repeat the request → 409. Send it twice in parallel → one 201 and one 409.
@@ -612,7 +807,7 @@ users  →  outlets  →  receipt_counters  →  outlet_menu_items (by menu_item
 6. As a staff member of the outlet, `GET /outlets/:o/menu-items` lists only enabled items, zero-stock ones included. Disabled items return 404 on the detail endpoint. Another outlet's menu returns 403.
 7. Lock check: in `psql`, `BEGIN; SELECT * FROM outlets WHERE id = '<o>' FOR UPDATE;`, then call the assign endpoint. It waits until you `ROLLBACK`.
 
-## Inventory API
+### Inventory API
 
 Stock lives in `outlet_menu_items.stock_quantity`: one current balance per outlet assignment. There is no inventory or movement table, so **adjustments are not recorded as history**. Only the resulting balance is stored.
 
@@ -654,7 +849,7 @@ Stock status is separate from sales availability. An inactive item holding 100 u
 - **Staff:** see only enabled items in their active outlets, zero stock included. They get 403 for an outlet they don't belong to, and 404 for disabled items.
 - **HQ admins:** see everything, including inactive outlets, assignments and master items.
 
-### Adjustments
+#### Adjustments
 
 ```json
 { "operation": "INCREASE", "quantity": 20 }
@@ -683,7 +878,7 @@ Stock status is separate from sales availability. An inactive item holding 100 u
 - Inactive assignments and inactive master items **can** be corrected, provided the outlet is active.
 - Adjusting never touches prices, assignment status, the master item, receipt counters or sales.
 
-### Transaction and concurrency strategy
+#### Transaction and concurrency strategy
 
 The adjustment runs in one Read Committed transaction:
 
@@ -723,7 +918,7 @@ The adjustment runs in one Read Committed transaction:
 - `tests/unit/inventory-repository.test.ts` covers threshold boundaries, the balance maths including `MAX`, the exact lock order, the stock-only update, the no-op `SET`, refusals without writes, and rollback propagation.
 - These use mocked Prisma and **do not prove PostgreSQL locking**; see below.
 
-### Manual PostgreSQL verification (do not run without approval; use disposable records)
+#### Manual PostgreSQL verification (do not run without approval; use disposable records)
 
 1. **Concurrent increases:** set stock to 10 via `SET`. Send two `{"operation":"INCREASE","quantity":5}` requests simultaneously (two terminals, or `xargs -P2`). Final stock is 20.
 2. **Concurrent decreases:** from 10, send two simultaneous `DECREASE 7`. One returns 200 and one returns 409 `INSUFFICIENT_STOCK`. Final stock is 3.
@@ -733,7 +928,7 @@ The adjustment runs in one Read Committed transaction:
 6. **Failure leaves the balance alone:** a rejected adjustment leaves `stock_quantity` unchanged.
 7. **No side effects:** after adjustments, `override_price`, `is_active`, `menu_items.*`, `receipt_counters` and `sales` are unchanged.
 
-## Sales API (POS and receipts)
+### Sales API (POS and receipts)
 
 Endpoints are nested under an outlet: `/api/v1/outlets/:outletId/sales`.
 
@@ -750,7 +945,7 @@ The `by-request` route is registered before `/:saleId`.
 - **Staff restriction in the database:** every staff read carries the restriction in the Prisma `where` (outlet active and caller a member), for both the page and the count.
 - **No cross-outlet lookups:** details are looked up by **both** `outletId` and `saleId`, so a sale id from another outlet returns 404.
 
-### Request
+#### Request
 
 ```json
 {
@@ -777,7 +972,7 @@ The `by-request` route is registered before `/:saleId`.
 - A combined quantity above `INTEGER` returns 400.
 - Lines are sorted by `menuItemId`.
 
-### Response
+#### Response
 
 `{ sale, replayed }`, with HTTP **201** for a new sale and **200** for an idempotent replay.
 
@@ -793,7 +988,7 @@ The `by-request` route is registered before `/:saleId`.
 - `from`/`to` (ISO with offset): a half-open range `created_at >= from AND created_at < to`, at most 366 days, the same convention as the reports.
 - `sortBy`: `createdAt`, `receiptNumber` or `totalAmount`, with `id` as the tie-breaker.
 
-### Transaction (one Read Committed interactive transaction)
+#### Transaction (one Read Committed interactive transaction)
 
 1. `users FOR SHARE` for the cashier. Re-check that the account is active, the **current** role is `OUTLET_STAFF`, and an `outlet_memberships` row exists.
    - Staff deactivation (`UPDATE users`) and membership replacement (`users FOR UPDATE`) conflict with this lock. A revocation therefore either waits for the sale or is seen by it, and is never applied halfway through.
@@ -833,7 +1028,7 @@ The `by-request` route is registered before `/:saleId`.
 - Errors where the commit outcome is unknown, such as a dropped connection, are **not** retried. The client resolves them with idempotent replay or the `by-request` endpoint.
 - Consistent lock ordering reduces deadlocks but does not rule them out.
 
-### Exact money
+#### Exact money
 
 - Prices are read from PostgreSQL as text (`::text`) and parsed strictly as `^\d{1,14}\.\d{2}$`. `NaN` or any malformed value throws and rolls back.
 - Arithmetic uses **BigInt minor units**. Prisma's `Decimal` (decimal.js) defaults to 20 significant digits, which a 12-digit price × 10-digit quantity can exceed, so it is not used for multiplication.
@@ -841,13 +1036,13 @@ The `by-request` route is registered before `/:saleId`.
 - The service asserts that the total equals the sum of the lines.
 - All amounts are returned as two-decimal strings. The currency is BDT.
 
-### Snapshots and immutability
+#### Snapshots and immutability
 
 - Sale lines store `item_name`, `unit_price` and `line_total`, so receipts never use current catalog prices.
 - There is no update or delete endpoint for sales.
 - `outletName` is **not** snapshotted (the schema has no column for it), so historical receipts show the outlet's current name. The outlet `code` is immutable.
 
-### Concurrency verification (real PostgreSQL)
+#### Concurrency verification (real PostgreSQL)
 
 `scripts/verify-sales-concurrency.ts` runs the real services and repositories against a **disposable, local** PostgreSQL. The shared guard in `scripts/support/disposable-database.ts` refuses to start unless:
 
@@ -884,13 +1079,13 @@ Scenario I wraps the Prisma client in a script-local `Proxy` whose interactive t
 
 The script prints PASS or FAIL per check and exits non-zero on any failure. **It has been executed on a disposable local PostgreSQL 18: 34/34 checks passed**, including two extra races (G2: assignment disabled mid-sale; H2: cashier deactivated mid-sale). See [docs/VERIFICATION.md](docs/VERIFICATION.md). The unit tests (`sale-calculation`, `sales`, `sale-repository`) use mocks: they prove the orchestration (lock order, writes only after validation, no writes on replay or refusal, errors propagating from every write step), **not** PostgreSQL's locking or atomicity.
 
-### Comparison with the documented design
+#### Comparison with the documented design
 
 - **Same lock order as planned:** user → outlet → receipt counter → assignments → master items, as in the ERD and flowchart and the earlier "future sale" notes.
 - **Idempotency lookup placement:** runs _after_ the counter lock rather than before the transaction. This serializes duplicate submissions of the same request id, so they cannot both pass the lookup.
 - **No structural schema changes.**
 
-## Reports API (HQ_ADMIN only)
+### Reports API (HQ_ADMIN only)
 
 All endpoints require `HQ_ADMIN`. `OUTLET_STAFF` gets `403` and anonymous requests get `401`.
 
@@ -900,14 +1095,14 @@ All endpoints require `HQ_ADMIN`. `OUTLET_STAFF` gets `403` and anonymous reques
 | GET    | `/api/v1/reports/revenue-by-outlet`                   | Paginated revenue per outlet                         |
 | GET    | `/api/v1/reports/outlets/:outletId/top-selling-items` | Top 5 items of one outlet by quantity                |
 
-### Date range
+#### Date range
 
 - `from` and `to` are optional ISO 8601 timestamps **with an offset** (`Z` or `+06:00`). Send both or neither. Neither means all sales.
 - The range is half-open: `created_at >= from AND created_at < to`. Clients send the next local midnight as `to`, never `23:59:59`.
 - Rejected with `400`: one bound only, an invalid timestamp or one without an offset, `to <= from`, or a span longer than 366 days. Unknown query parameters are also rejected.
 - Outlet counts (`totalOutlets`, `activeOutlets`) and outlet `isActive` are **current** values, not historical.
 
-### Responses
+#### Responses
 
 ```json
 // GET /reports/summary
@@ -927,14 +1122,14 @@ All endpoints require `HQ_ADMIN`. `OUTLET_STAFF` gets `403` and anonymous reques
 - **Revenue by outlet** lists every outlet, including inactive ones and outlets without sales (`"0.00"`, `"0"`). `search` (≤ 100 characters) matches the code or name with `ILIKE`, escaping `%`, `_` and `\`. `sortBy` is `totalRevenue` (default), `totalSales` or `code`, and `sortOrder` defaults to `desc`. `o.id ASC` always breaks ties. Sorting happens in PostgreSQL on the numeric values.
 - **Top-selling items** returns `404` for an unknown outlet and allows inactive outlets. Items are grouped by `menu_item_id`, ordered by `SUM(quantity) DESC, menu_item_id ASC`, and limited to 5. Revenue is `SUM(line_total)`, so the same item sold at different prices is exact. The `sku` and `name` labels come from the **current** master item, while `sale_items.item_name` keeps the historical receipt text.
 
-### Money and counts
+#### Money and counts
 
 - Aggregation stays in PostgreSQL `NUMERIC` (`SUM(total_amount)`, `SUM(line_total)`) and is returned as text. It is **not** cast back to `DECIMAL(16,2)`, so company-wide totals have no upper bound.
 - `serializeAggregateMoney` normalizes to exactly two decimals (`"12.5"` → `"12.50"`). `AggregateMoney` in OpenAPI has no maximum. Any other text, such as `NaN`, a negative or a third decimal, throws. The client gets a generic `500`, never a wrong figure. (The pending `money_not_nan` migration will block NaN at write time; it is still **not applied**.)
 - Sale counts and unit totals are integer strings (`^\d+$`), safe beyond 2^53. Outlet counts are JSON integers.
 - The currency is BDT.
 
-### Query strategy
+#### Query strategy
 
 | Endpoint          | Queries (one snapshot)                                                                                                                                                      |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -948,7 +1143,7 @@ All endpoints require `HQ_ADMIN`. `OUTLET_STAFF` gets `403` and anonymous reques
 - **Indexes used:** `sales(outlet_id, created_at)` for per-outlet ranges and grouping, the `sales` primary key and `(id, outlet_id)` unique for the `sale_items` join, `sale_items(outlet_id, menu_item_id)` for top-selling, and the `sale_items` primary key `(sale_id, menu_item_id)`. A company-wide range filter without an outlet scans `sales`. If data volume grows, a `sales(created_at)` index is the next candidate. It is **not** added now.
 - `EXPLAIN ANALYZE` was **not** run against the shared database. Run it only on a disposable copy.
 
-### Reporting verification (real PostgreSQL)
+#### Reporting verification (real PostgreSQL)
 
 `scripts/verify-reports.ts` uses the same disposable-database guard as the concurrency script, with `REPORTS_VERIFICATION_DATABASE_URL`. It creates its own fixtures in March 2099:
 
@@ -974,7 +1169,305 @@ REPORTS_VERIFICATION_DATABASE_URL=$VERIFY_URL CONFIRM_DISPOSABLE_DATABASE=yes pn
 
 **Executed on a disposable local PostgreSQL 18: 18/18 checks passed, and passed again on a second run against the same database.** Each run picks a random future month and refuses to seed unless that month (±1 day) contains no sales, so repeated runs cannot contaminate each other. The unit tests (`reports`, `report-repository`, `disposable-database`) are mocked. They prove validation, authorization, SQL shape (joins, half-open filter, tie-breaks, parameter binding), serialization and the guard's refusals, but **not** PostgreSQL's results.
 
-## API integration verification (real HTTP, real PostgreSQL)
+## Database Schema
+
+PostgreSQL holds ten tables, defined in [`prisma/schema.prisma`](prisma/schema.prisma) and created only through the committed SQL migrations in `prisma/migrations/`. The full diagram is in [erd-diagram.pdf](erd-diagram.pdf), and [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-data-model) explains the design.
+
+| Table                | Purpose                                                                         | Key constraints                                                                                                                                                                                                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `users`              | HQ administrators and outlet staff (`role`: `HQ_ADMIN` or `OUTLET_STAFF`)       | `email` unique; Argon2id `password_hash`; `is_active` index                                                                                                                                                                                                                       |
+| `refresh_sessions`   | Rotating refresh tokens, stored only as SHA-256 hashes and grouped in families  | `token_hash` unique; FK to `users` with `ON DELETE CASCADE`; revoke reason enum (`LOGOUT`, `ROTATED`, `REPLAY_DETECTED`, `ADMIN_REVOKED`, `EXPIRED`)                                                                                                                              |
+| `outlets`            | Physical outlets                                                                | `code` unique; `CHECK` that code and name are not blank                                                                                                                                                                                                                           |
+| `outlet_memberships` | Which staff may work at which outlet                                            | Composite PK `(user_id, outlet_id)`; index on `outlet_id`                                                                                                                                                                                                                         |
+| `receipt_counters`   | One gap-free receipt sequence per outlet, created with the outlet               | PK = `outlet_id`; `CHECK (last_number >= 0)`                                                                                                                                                                                                                                      |
+| `menu_items`         | Master menu shared by all outlets                                               | `sku` unique; `CHECK` that SKU and name are not blank; `base_price DECIMAL(12,2)`, `CHECK (>= 0)` and `<> 'NaN'`                                                                                                                                                                  |
+| `outlet_menu_items`  | An outlet's assignment of a master item: optional override price, stock, status | Composite PK `(outlet_id, menu_item_id)`; `CHECK (stock_quantity >= 0)`; override `NULL` or `>= 0` and not NaN                                                                                                                                                                    |
+| `sales`              | One completed sale (receipt)                                                    | Unique `(outlet_id, receipt_number)`, `(outlet_id, request_id)` and `(id, outlet_id)`; `CHECK (receipt_number > 0)`; `total_amount DECIMAL(16,2)`, `>= 0` and not NaN; `request_hash` must be SHA-256 hex; index `(outlet_id, created_at)`                                        |
+| `sale_items`         | Immutable line snapshots: item name, unit price, line total                     | PK `(sale_id, menu_item_id)`; composite FKs `(sale_id, outlet_id) → sales(id, outlet_id)` and `(outlet_id, menu_item_id) → outlet_menu_items`; `CHECK (quantity > 0)`, `CHECK (line_total = unit_price * quantity)`, prices `>= 0` and not NaN; index `(outlet_id, menu_item_id)` |
+| `_prisma_migrations` | Prisma's migration history                                                      | Managed by Prisma                                                                                                                                                                                                                                                                 |
+
+**Design points:**
+
+- **Effective price** = `outlet_menu_items.override_price` if set, otherwise `menu_items.base_price`.
+- **Outlet isolation in the database:** the two composite foreign keys on `sale_items` share `outlet_id`, so a sale line can never reference another outlet's sale or assignment.
+- **Snapshots:** sale lines copy the name and prices, so receipts never change when the menu does.
+- **History is protected:** business relations use `ON DELETE RESTRICT`, sale relations also use `ON UPDATE RESTRICT`, and no endpoint deletes business data.
+- **Exact money:** prices are `DECIMAL(12,2)` and totals `DECIMAL(16,2)`. `NaN` is rejected by the `money_not_nan` migration.
+
+```mermaid
+erDiagram
+    users ||--o{ refresh_sessions : "has"
+    users ||--o{ outlet_memberships : "is assigned"
+    outlets ||--o{ outlet_memberships : "has staff"
+    outlets ||--o| receipt_counters : "numbers receipts"
+    outlets ||--o{ outlet_menu_items : "offers"
+    menu_items ||--o{ outlet_menu_items : "is assigned as"
+    outlets ||--o{ sales : "records"
+    users ||--o{ sales : "creates"
+    sales ||--|{ sale_items : "contains"
+    outlet_menu_items ||--o{ sale_items : "is sold as"
+
+    users {
+        uuid id PK
+        varchar email UK
+        varchar password_hash
+        Role role
+        boolean is_active
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    refresh_sessions {
+        uuid id PK
+        uuid family_id
+        char token_hash UK
+        uuid user_id FK
+        timestamptz expires_at
+        timestamptz revoked_at
+        SessionRevokeReason revoke_reason
+        varchar user_agent
+        inet ip_address
+        timestamptz created_at
+        timestamptz last_used_at
+    }
+    outlets {
+        uuid id PK
+        varchar code UK
+        varchar name
+        varchar address
+        boolean is_active
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    outlet_memberships {
+        uuid user_id PK, FK
+        uuid outlet_id PK, FK
+        timestamptz created_at
+    }
+    receipt_counters {
+        uuid outlet_id PK, FK
+        int last_number
+    }
+    menu_items {
+        uuid id PK
+        varchar sku UK
+        varchar name
+        varchar description
+        decimal base_price
+        boolean is_active
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    outlet_menu_items {
+        uuid outlet_id PK, FK
+        uuid menu_item_id PK, FK
+        decimal override_price
+        int stock_quantity
+        boolean is_active
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    sales {
+        uuid id PK
+        uuid outlet_id FK
+        uuid created_by_id FK
+        int receipt_number
+        uuid request_id
+        char request_hash
+        decimal total_amount
+        timestamptz created_at
+    }
+    sale_items {
+        uuid sale_id PK, FK
+        uuid outlet_id FK
+        uuid menu_item_id PK, FK
+        varchar item_name
+        int quantity
+        decimal unit_price
+        decimal line_total
+    }
+```
+
+The diagram shows each relationship once. In the database, `sale_items` reaches `sales` through `(sale_id, outlet_id)` and `outlet_menu_items` through `(outlet_id, menu_item_id)`.
+
+## Architecture
+
+This is a summary. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the full design and [flowchart-diagram.pdf](flowchart-diagram.pdf) the business workflow.
+
+**Layers.** The backend is a modular monolith: one deployable Express 5 process, organized by business module. Every module follows the same request path:
+
+```text
+route (middleware + validation) → controller (HTTP only) → service (business rules, errors, retries) → repository (Prisma, transactions, row locks, raw SQL)
+```
+
+**Middleware**, in order:
+
+1. request id;
+2. pino HTTP logging with redaction;
+3. helmet;
+4. exact-origin CORS (`GET`, `POST`, `PATCH`, `PUT`, with credentials);
+5. global rate limit;
+6. request timeout;
+7. JSON body limit;
+8. cookie parser;
+9. then per route: `authenticate`, `authorize(role)`, `requireOutletAccess`, `validate({ body, query, params })`;
+10. finally `notFound` and a central `errorHandler`.
+
+**Authentication and outlet authorization:**
+
+- **Access tokens:** short-lived JWTs (15 minutes by default) with issuer and audience checks. `authenticate` reloads the user on every request, so deactivation takes effect immediately.
+- **Refresh tokens:** opaque, rotating, stored as SHA-256 hashes. Reusing a rotated token revokes the whole family. They travel in an httpOnly `SameSite=Strict` cookie scoped to `/api/v1/auth`.
+- **Roles:** `authorize` enforces `HQ_ADMIN` or `OUTLET_STAFF`.
+- **Outlet access:** HQ can reach any existing outlet; staff need an active membership of an active outlet.
+
+**The sale transaction:**
+
+- **Global lock order:** `POST /outlets/:outletId/sales` runs one `READ COMMITTED` transaction that locks rows in the order every module uses:
+
+  ```text
+  users → outlets → receipt_counters → outlet_menu_items (by menu_item_id) → menu_items (by id)
+  ```
+
+- **Idempotency:** the `(outlet_id, request_id)` lookup runs after the receipt-counter lock, so concurrent duplicate submissions cannot both create a sale.
+- **Validation:** prices and availability are checked against the locked rows.
+- **Writes:** stock is deducted with guarded updates, the counter is incremented, and the sale and its line snapshots are inserted. Any failure rolls back all of it.
+- **Isolation levels elsewhere:** refresh-token rotation uses `SERIALIZABLE`. Each report endpoint reads one `REPEATABLE READ` snapshot without locks.
+- **Time zone:** every database session is pinned to UTC.
+
+**Source layout:**
+
+```text
+src/
+├── common/                 # framework-neutral errors, types, and utilities
+├── config/                 # env-file loading, validated configuration, logging
+├── database/               # Prisma client factory and connection pool
+├── docs/                   # implemented-endpoint OpenAPI contract
+├── generated/prisma/       # generated; ignored and recreated during install/build
+├── middlewares/            # HTTP cross-cutting concerns
+├── modules/
+│   ├── access/             # outlet-access checks (membership, HQ scope)
+│   ├── auth/               # routes → controller → service → repository
+│   ├── health/             # liveness and readiness
+│   ├── inventory/          # outlet stock balances and adjustments
+│   ├── menu-items/         # master menu (HQ only)
+│   ├── outlet-menu-items/  # outlet menu assignments and price overrides
+│   ├── outlets/            # outlet management
+│   ├── reports/            # revenue reporting (HQ only)
+│   ├── sales/              # POS sales, receipts, idempotency
+│   └── staff/              # staff accounts and outlet memberships
+├── routes/                 # versioned route composition
+├── app.ts                  # side-effect-free Express factory
+└── server.ts               # process and server lifecycle
+prisma/
+├── migrations/             # immutable SQL migration history
+├── schema.prisma           # full domain schema
+├── seed.ts                 # explicitly invoked HQ administrator seed
+└── seed-demo.ts            # idempotent, namespaced demo data
+scripts/                    # real-PostgreSQL verification, audit, demo login checks
+docs/                       # ARCHITECTURE.md, VERIFICATION.md
+tests/unit/                 # database-independent unit tests
+```
+
+Controllers only translate HTTP input and output. Services hold business rules without Express types. Repositories own all Prisma access, transactions and row locks.
+
+## Scaling Strategy
+
+The question: how would OutletHub support **10 outlets and 100,000 transactions per month**?
+
+The section separates three kinds of statement: what is **implemented**, what was **measured**, and what is **proposed**. The full reasoning is in [docs/ARCHITECTURE.md §9](docs/ARCHITECTURE.md#9-scaling-plan-10-outlets-and-100000-transactions-per-month-proposal), and the measurements are in [docs/VERIFICATION.md](docs/VERIFICATION.md).
+
+**Load in numbers:**
+
+- 100,000 sales a month is about 3,300 a day, or about 0.04 per second on average.
+- An evening peak of about 10× the average is still under one sale per second across the company, and far lower per outlet.
+
+**Measured:**
+
+- On a synthetic dataset of **100,000 sales, 250,000 sale lines and 10 outlets** in a disposable PostgreSQL 18, every reporting and listing query ran in **≤ 23 ms**.
+- PostgreSQL 18 answered a company-wide 1-day summary in **1.7 ms** by skip-scanning the existing `(outlet_id, created_at)` index.
+- From a remote client to the configured database, a round trip took about **160 ms**. A sale costs 15–20 round trips, so roughly **3 s** remotely; running the API next to the database removes most of that.
+- **No sustained load test was run**, so no throughput figure is claimed.
+
+**Conclusion:** the current single database and modular monolith comfortably fit this target. Everything below is a **proposal**, to adopt when a measured metric requires it.
+
+### a. Database scaling
+
+- **Connection pooling.** _Implemented:_ each API instance has a bounded pool (`DATABASE_POOL_MAX`). _Proposal:_ keep `instances × pool` below `max_connections` minus headroom. Add PgBouncer in transaction mode only when the instance count grows. The session-level UTC pin would then move to the database or role setting.
+- **Indexing.** _Implemented and measured:_ the indexes on `sales (outlet_id, created_at)`, `sale_items (outlet_id, menu_item_id)` and the unique and primary keys cover every hot path. _Proposal:_ find real slow queries with `pg_stat_statements` and `EXPLAIN (ANALYZE, BUFFERS)` on a production-sized copy. Add `sales (created_at)` only if company-wide range reports become slow.
+- **Partitioning `sales` by month.** _Proposal:_ range-partition `sales` and `sale_items` by month once the tables reach tens of millions of rows, or when archiving needs cheap partition detach. About 1.2 million sales a year does not need it yet. Partitioning would also require the unique keys to include the partition key.
+- **Read replicas.** _Proposal:_ only when report load measurably affects POS latency. Reports served from a replica must show an "as of" time, because of replication lag.
+- **Archiving.** _Proposal:_ keep the last 13–24 months hot. Move older months to archive partitions or cold storage, and keep pre-aggregated summaries for long-range reporting.
+- **Backups and PITR.** _Proposal:_ continuous WAL archiving with point-in-time recovery, daily base backups and regularly tested restores. A sales ledger needs more than snapshots.
+- **Receipt-counter contention.** The counter row lock serializes sales **per outlet** only. At about 50–100 ms of in-region transaction time, that is roughly 10–20 sales per second per outlet (an estimate, not a measurement), far above one till's rate. _Proposal, if ever needed:_ per-terminal receipt series. That would change the gap-free-per-outlet guarantee.
+
+### b. Reporting performance
+
+- **Today:** aggregation runs in PostgreSQL, ranges are index-assisted, each endpoint reads one `REPEATABLE READ` snapshot without locks, and ranges are limited to 366 days.
+- **Pre-aggregated daily summaries** (_proposal_): `sales_daily(outlet_id, day, revenue, sale_count, units)` and a per-item daily table. Long ranges then read about 30 rows per outlet per month instead of every sale.
+- **Incremental refresh** (_proposal_): either update the summaries in the sale transaction (strictly consistent, slightly longer writes), or refresh asynchronously, for example with a materialized view and `REFRESH MATERIALIZED VIEW CONCURRENTLY` or an incremental job. The asynchronous options are eventually consistent and labelled "as of".
+- **Replica-backed reporting** (_proposal_): send report queries to a read replica so they never compete with the POS write path.
+- **Caching** (_proposal_): cache closed periods (past days) aggressively, because they never change. Keep "today" short-lived or uncached. On the client, TanStack Query already caches and refetches only on demand or after a sale.
+- **Date-range limits** (_implemented_): at most 366 days per request, with half-open `[from, to)` ranges. Longer analysis would use the summaries.
+
+### c. Infrastructure
+
+- **Horizontal API instances** (_proposal_): the API is stateless (sessions live in PostgreSQL), so several instances can run behind Coolify's Traefik load balancer. Readiness uses `/api/v1/health/ready` and liveness `/api/v1/health/live`; both are implemented.
+- **Shared rate-limit store** (_proposal_): current limits are in-memory per process. With more than one instance, move them to Redis (or the edge) so limits are global.
+- **Health checks** (_implemented_): the Docker `HEALTHCHECK` covers liveness. The readiness endpoint pings the database with a timeout.
+- **Monitoring and logging:**
+  - _Implemented:_ structured pino JSON logs with request ids and secret redaction.
+  - _Proposal:_ ship the logs to a central store.
+  - _Proposal:_ alert on route latency percentiles; 5xx rates; `INSUFFICIENT_STOCK`/`PRICE_CHANGED`/`CONCURRENT_UPDATE` rates; pool saturation; lock waits; slow queries; disk and WAL growth.
+- **CI/CD:**
+  - _Today:_ Husky runs lint-staged and commitlint locally, and Coolify builds from Git.
+  - _Proposal:_ a CI pipeline running `pnpm verify`, `security:audit` and the real-database suites against a disposable PostgreSQL before deploy.
+- **Migrations strategy:**
+  - _Implemented:_ committed, additive SQL migrations applied explicitly (`pnpm db:migrate:deploy`, or the `migrate` Docker stage) **before** deploying code that needs them. Deployments never migrate automatically.
+  - _Proposal:_ expand-and-contract changes for zero-downtime deploys, and a separate migration role with DDL rights.
+
+### d. Architectural evolution
+
+1. **Modular monolith (current).** Sale, stock deduction and receipt numbering need one ACID transaction, and a single deployable keeps operations simple.
+2. **Events through a transactional outbox** (_proposal_). The sale transaction also writes an `outbox` row, and a relay publishes `SaleCompleted`. Reporting summaries, notifications and a kitchen display consume it idempotently, without lengthening the POS path.
+3. **Extract services where a metric demands it** (_proposal_). Reporting is the natural first candidate, because it is read-heavy and tolerates eventual consistency. Sales & Inventory should stay one service with one database.
+
+**When to act:** when an agreed threshold is crossed, for example POS p95 above 300 ms or report p95 above 2 s. Measure first, with route latency percentiles, `pg_stat_statements`, lock-wait monitoring and pool saturation.
+
+### Microservices evolution (summary)
+
+Possible bounded contexts:
+
+- Identity & Access;
+- Outlet Management;
+- Menu & Pricing;
+- **Sales & Inventory** (one service, one database);
+- Reporting (event-built read models);
+- Notifications/Kitchen.
+
+How they would work together:
+
+- **Data:** each service owns its schema.
+- **Communication:** services talk through synchronous calls for current data and events for everything else.
+- **Delivery:** a transactional outbox avoids dual writes, idempotent consumers (inbox tables) give at-least-once delivery with effect-once results, and dead-letter queues plus reconciliation jobs handle failures.
+
+Sales, stock deduction and receipt numbering must stay in one transactional boundary. Splitting them would replace today's guarantees (no oversell, gap-free receipts, replay without double deduction) with sagas and compensations. Full proposal: [docs/ARCHITECTURE.md §10](docs/ARCHITECTURE.md#10-microservices-evolution-proposal).
+
+### Offline POS & KDS (summary)
+
+This is a **proposal; it is not implemented**.
+
+- **Local data:** each terminal keeps a catalog and price snapshot and a durable local order store, such as IndexedDB or SQLite.
+- **Sync:** each sale gets a client-generated UUID, which is today's `requestId`, so synchronization reuses the server's idempotency. A pending queue syncs with backoff and acknowledgments.
+- **Offline sales endpoint:** offline sales need a separate endpoint that records conflicts (stale prices, negative stock) for review instead of rejecting them.
+- **Receipt numbers:** strict gap-free per-outlet numbering cannot be guaranteed across disconnected terminals. The options are provisional local receipts, reserved ranges per terminal, or an outlet-local coordinator.
+- **Kitchen display:** a kitchen display (KDS) talks to that coordinator over the outlet LAN, with acknowledged, de-duplicated orders and persisted status transitions.
+
+Full proposal: [docs/ARCHITECTURE.md §11](docs/ARCHITECTURE.md#11-offline-pos-and-kds-strategy-proposal-not-implemented).
+
+## Verification
+
+Every executed check, with real results, is in [docs/VERIFICATION.md](docs/VERIFICATION.md). The real-PostgreSQL suites for concurrency and reporting are described under [Sales API](#concurrency-verification-real-postgresql) and [Reports API](#reporting-verification-real-postgresql).
+
+### API integration verification (real HTTP, real PostgreSQL)
 
 `scripts/verify-api-integration.ts` (`pnpm verify:api`) builds the **real Express app** (`createApp`) on a disposable local database behind the same guard. It drives the whole business flow through HTTP with Supertest, using real Argon2id hashes, real JWTs and refresh cookies, real transactions, stock deduction, receipts and report SQL. Nothing is mocked.
 
@@ -994,34 +1487,6 @@ API_VERIFICATION_DATABASE_URL=$VERIFY_URL CONFIRM_DISPOSABLE_DATABASE=yes pnpm v
 
 Result: **75/75 checks passed**, on two consecutive runs. This includes a check that sessions run in UTC on a cluster whose server default is `Asia/Dhaka`.
 
-## Demo data (configured database)
-
-`pnpm db:seed:demo` (`prisma/seed-demo.ts`) seeds realistic demonstration data into the **configured** database through the production services. Outlets go through the outlet + receipt-counter transaction, staff through Argon2id hashing, assignments, stock through the guarded adjustment, and every sale through `SaleService.create`.
-
-**What it creates:**
-
-- Five outlets: `DEMO-MIRPUR`, `DEMO-GULSHAN`, `DEMO-DHANMONDI`, `DEMO-UTTARA` (assigned items and stock, no sales) and `DEMO-BANANI` (historical sales, then deactivated).
-- 32 master items (2 retired), 115 assignments: inherited and override prices, one `0.00` override, 3 inactive assignments, and high, medium, low and zero stock.
-- Six `OUTLET_STAFF` accounts (`staff.*@example.com`).
-- 400 historical sales over the 30 days before the first seeding day. The plan was capped from 500 to 400 after 325 sales existed; those are kept, and the remaining 75 are spread evenly over the final days. The seed refuses to run if any demo sale lies outside the plan.
-
-**Safety and idempotency:**
-
-- Everything is namespaced (`DEMO-` codes and SKUs). The seed refuses to touch a same-named record that is not demo data.
-- Sales use deterministic request ids. The plan is anchored to the demo Mirpur outlet's creation day, so re-runs reproduce the same plan.
-- Stock is replenished once, to the target balance plus the planned consumption, and never reset after sales exist.
-- Historical timestamps are applied only to sales created by the seed's own deterministic request ids.
-- Banani is deactivated only after all of its planned sales exist.
-- An interrupted run resumes where it stopped. This was tested by killing a rehearsal run at 225 sales; the resumed run reached an identical end state.
-
-**Passwords:**
-
-- New accounts get random passwords. They are printed once and, with `DEMO_CREDENTIALS_FILE=<path>`, written to a `0600` file outside the repository.
-- Re-runs never rotate them. `pnpm db:seed:demo --rotate-demo-passwords` explicitly issues new passwords for the demo staff accounts only.
-- Passwords are never stored in source or docs.
-
-`pnpm db:audit` is read-only. It prints counts, integrity checks (separately for demo and existing data) and business figures for the configured database.
-
 ## Known limitations
 
 - **Payments:** no payments, discounts, taxes, refunds or offline POS. A "sale" is a recorded transaction.
@@ -1029,79 +1494,6 @@ Result: **75/75 checks passed**, on two consecutive runs. This includes a check 
 - **Interactive transactions:** they use Prisma's default 5 s timeout. Run the API close to the database; from a remote client (~160 ms round trip) a sale takes about 3 s.
 - **Audit trail:** no audit log of stock adjustments (only the current balance is stored).
 - **Load:** no sustained load test was run. Query timings come from a 100,000-sale synthetic dataset on a local disposable database; see [docs/VERIFICATION.md](docs/VERIFICATION.md).
-
-## Docker (application only)
-
-The Dockerfile has these stages:
-
-- `production` (default runtime): non-root `nodeapp` user, production dependencies only, a `HEALTHCHECK` on `/api/v1/health/live` that respects `PORT`.
-- `migrate`: a one-off `prisma migrate deploy` job.
-
-Env files are excluded by `.dockerignore`, so no credentials are copied into any image.
-
-```bash
-cp .env.example .env.production      # NODE_ENV=production, COOKIE_SECURE=true, real secrets
-docker compose config --quiet        # validate
-docker compose up -d --build         # API on 127.0.0.1:${API_PORT:-3000}
-docker compose ps
-docker compose down
-```
-
-Compose has no database service. It reads `.env.production` at runtime and publishes the API on loopback only. The `migrate` service is behind the `migrate` profile and never starts with `up`.
-
-## Coolify deployment
-
-1. **Database:** create the PostgreSQL resource in Coolify. Copy its **internal** connection URL for the API, since the API runs on the same server. Use the public URL only for local access (see above).
-2. **Application:** add a resource from the Git repository. Use build pack **Dockerfile**, base directory `/` (this repository's root), and Dockerfile `Dockerfile` (the final stage, `production`, is the default target). Set the port to `3000`, or whatever `PORT` you set.
-3. **Domain/HTTPS:** assign the domain (for example `https://api.example.com`). Coolify's Traefik proxy gets the certificate and terminates TLS. It forwards `X-Forwarded-Proto` and `X-Forwarded-For`.
-4. **Environment variables** (runtime, not build-time). Mark secrets as secret:
-
-   ```dotenv
-   NODE_ENV=production
-   DATABASE_URL=<internal Coolify URL>
-   DATABASE_POOL_MAX=5
-   JWT_SECRET=<≥32 random chars, e.g. `openssl rand -base64 48`>
-   JWT_ISSUER=outlet-hub
-   JWT_AUDIENCE=outlet-hub-web
-   ALLOWED_ORIGINS=https://<frontend-domain>
-   TRUST_PROXY=1
-   COOKIE_SECURE=true
-   COOKIE_SAME_SITE=strict      # use `none` only if the frontend is on a different site
-   LOG_LEVEL=info
-   LOG_PRETTY=false
-   SWAGGER_ENABLED=false
-   ```
-
-5. **Health check:** the image's Docker `HEALTHCHECK` is used automatically. If you configure Coolify's own check, use path `/api/v1/health/live`. Use `/api/v1/health/ready` for database readiness monitoring.
-6. **Migrations:** apply pending migrations explicitly _before_ deploying code that needs them (`pnpm db:migrate:deploy` from a trusted machine). Deployments never migrate automatically.
-
-`TRUST_PROXY=1` makes the client IP (used for rate limiting) and the request protocol (used for Secure cookies) come from exactly one trusted hop, Coolify's proxy. Do not set it higher unless another proxy, such as Cloudflare, sits in front.
-
-## Commands
-
-| Command                             | Action                                                         |
-| ----------------------------------- | -------------------------------------------------------------- |
-| `pnpm dev`                          | Watch-mode server (`.env.development`)                         |
-| `pnpm build` / `pnpm start`         | Compile / run compiled output                                  |
-| `pnpm typecheck`                    | Strict TypeScript validation                                   |
-| `pnpm lint` / `pnpm lint:fix`       | ESLint validation / fix                                        |
-| `pnpm format:check` / `pnpm format` | Prettier validation / fix                                      |
-| `pnpm test` / `pnpm test:watch`     | Database-independent unit tests                                |
-| `pnpm test:coverage`                | Coverage report                                                |
-| `pnpm verify`                       | Lint, typecheck, format check, tests, and build                |
-| `pnpm security:audit`               | High-severity production dependency audit                      |
-| `pnpm prisma:generate`              | Generate the typed Prisma client                               |
-| `pnpm db:migrate:diff`              | Read-only: print SQL from the live DB to `schema.prisma`       |
-| `pnpm db:migrate:status`            | Read-only: show applied/pending migrations                     |
-| `pnpm db:migrate:deploy`            | Apply committed migrations (**writes to the shared database**) |
-| `pnpm db:seed:admin`                | Explicitly seed/rotate the HQ admin (**writes**)               |
-| `pnpm verify:sales-concurrency`     | Concurrency scenarios on a **local disposable** database only  |
-| `pnpm verify:reports`               | Report fixtures and checks on a **local disposable** database  |
-| `pnpm verify:api`                   | Full HTTP business flow on a **local disposable** database     |
-| `pnpm db:seed:demo`                 | Idempotent demo data in the configured database (**writes**)   |
-| `pnpm db:audit`                     | Read-only counts and integrity checks                          |
-
-There is no external CI. Coolify builds from Git. Husky runs lint-staged on commit and enforces Conventional Commits. Run `pnpm verify && pnpm security:audit` before pushing.
 
 ## Security considerations
 
