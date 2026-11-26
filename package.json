@@ -25,16 +25,13 @@
     "db:migrate:diff": "prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script",
     "db:migrate:deploy": "prisma migrate deploy",
     "db:migrate:status": "prisma migrate status",
-    "db:seed:admin": "tsx prisma/seed.ts",
-    "db:seed:demo": "tsx prisma/seed-demo.ts",
     "security:audit": "pnpm audit --prod --audit-level=high",
     "verify": "pnpm lint && pnpm typecheck && pnpm format:check && pnpm test && pnpm build",
     "prepare": "husky",
     "verify:sales-concurrency": "tsx scripts/verify-sales-concurrency.ts",
     "verify:reports": "tsx scripts/verify-reports.ts",
     "verify:api": "tsx scripts/verify-api-integration.ts",
-    "db:audit": "tsx scripts/audit-database.ts",
-    "verify:demo-logins": "tsx scripts/verify-demo-logins.ts"
+    "db:audit": "tsx scripts/audit-database.ts"
   },
   "lint-staged": {
     "*.{ts,tsx,js,mjs,cjs}": [

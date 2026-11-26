@@ -27,7 +27,7 @@ OutletHub records sales; it does not process payments.
   - [Shared database (intentional, assessment only)](#shared-database-intentional-assessment-only)
   - [Environments](#environments)
   - [Local development](#local-development)
-  - [Database migrations and seed](#database-migrations-and-seed)
+  - [Database migrations](#database-migrations)
   - [Demo data (configured database)](#demo-data-configured-database)
   - [Docker (application only)](#docker-application-only)
   - [Full stack with Docker (API + frontend, external database)](#full-stack-with-docker-api--frontend-external-database)
@@ -75,7 +75,7 @@ There are no real users, so **local development and production intentionally con
 
 Consequences to keep in mind:
 
-- Every local action (logins, refresh-session rows, seeds, migrations) changes production data immediately.
+- Every local action (logins, refresh-session rows, scripts, migrations) changes production data immediately.
 - A migration applied from a laptop is applied to production. A bad migration breaks production.
 - Developer machines hold production credentials; a leaked `.env.development` is a production breach.
 - Local and deployed instances share the connection limit; keep `DATABASE_POOL_MAX` small on both.
@@ -90,10 +90,10 @@ Only two deployment environments exist: `development` and `production`.
 | File               | Purpose                                                           | Committed |
 | ------------------ | ----------------------------------------------------------------- | --------- |
 | `.env.example`     | Template documenting every variable                               | Yes       |
-| `.env.development` | Local `pnpm dev`, Prisma CLI, and seed commands                   | **No**    |
+| `.env.development` | Local `pnpm dev`, Prisma CLI, and scripts                         | **No**    |
 | `.env.production`  | Local production runs (`NODE_ENV=production pnpm start`, Compose) | **No**    |
 
-Loading rules (`src/config/load-env.ts`, imported first by the server, seed, and `prisma.config.ts`):
+Loading rules (`src/config/load-env.ts`, imported first by the server, scripts, and `prisma.config.ts`):
 
 1. `NODE_ENV` defaults to `development`. The matching `.env.<NODE_ENV>` is loaded if it exists.
 2. Variables already in the process environment always win. On Coolify, injected variables are authoritative. The image contains no env files.
@@ -123,7 +123,6 @@ All configuration is validated by Zod before startup. Invalid or unsafe combinat
 | `*_RATE_LIMIT_*`                                     | Global and authentication limiter windows and limits              |
 | `LOG_LEVEL`, `LOG_PRETTY`                            | Log level; pretty printing (development only)                     |
 | `SWAGGER_ENABLED`                                    | Enables Swagger UI outside production only                        |
-| `ADMIN_EMAIL`, `ADMIN_PASSWORD`                      | Read only by the explicit admin seed command                      |
 
 Never commit real env files. If a secret is exposed, rotate it. Removing it from Git history is not enough.
 
@@ -165,9 +164,9 @@ DATABASE_URL=postgresql://<user>:<password>@<vps-ip>:<public-port>/<db>?schema=p
 
 Use an absolute `sslrootcert` path. node-postgres treats `sslmode=require` as `verify-full`, so the certificate must match the host you connect to. If you connect by IP and the certificate does not include it, add `uselibpqcompat=true`. The CA is still verified, but the hostname is not. Option A avoids this entirely.
 
-### Database migrations and seed
+### Database migrations
 
-The schema is managed only through committed SQL migrations in `prisma/migrations/`. Nothing runs migrations or seeds automatically: not app startup, not the Docker build, not tests.
+The schema is managed only through committed SQL migrations in `prisma/migrations/`. Nothing runs migrations automatically: not app startup, not the Docker build, not tests.
 
 | Migration                        | Contents                                                                                                                                        |
 | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -204,40 +203,6 @@ Checks that span rows, such as a sale total equalling the sum of its lines, belo
    pnpm db:migrate:deploy                                  # from your machine, or
    docker compose --profile migrate run --rm migrate       # from the migration image
    ```
-
-Create or rotate the HQ administrator explicitly:
-
-```bash
-ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='long-unique-secret' pnpm db:seed:admin
-```
-
-The seed is idempotent for the normalized email and intentionally resets that account's password and role. It never logs the password.
-
-### Demo data (configured database)
-
-`pnpm db:seed:demo` (`prisma/seed-demo.ts`) seeds realistic demonstration data into the **configured** database through the production services. Outlets go through the outlet + receipt-counter transaction, staff through Argon2id hashing, assignments, stock through the guarded adjustment, and every sale through `SaleService.create`.
-
-**What it creates:**
-
-- Five outlets: `MIRPUR`, `GULSHAN`, `DHANMONDI`, `UTTARA` (assigned items and stock, no sales) and `BANANI` (historical sales, then deactivated).
-- 32 master items (2 retired), 115 assignments: inherited and override prices, one `0.00` override, 3 inactive assignments, and high, medium, low and zero stock.
-- Six `OUTLET_STAFF` accounts (`staff.*@example.com`).
-- 400 historical sales over the 30 days before the first seeding day. The plan was capped from 500 to 400 after 325 sales existed; those are kept, and the remaining 75 are spread evenly over the final days. The seed refuses to run if any demo sale lies outside the plan.
-
-**Safety and idempotency:**
-
-- Codes and SKUs are shared with the identifiers in `prisma/demo-identifiers.ts`. The seed refuses to touch a same-named record that is not demo data.
-- Sales use deterministic request ids. The plan is anchored to the demo Mirpur outlet's creation day, so re-runs reproduce the same plan.
-- Stock is replenished once, to the target balance plus the planned consumption, and never reset after sales exist.
-- Historical timestamps are applied only to sales created by the seed's own deterministic request ids.
-- Banani is deactivated only after all of its planned sales exist.
-- An interrupted run resumes where it stopped. This was tested by killing a rehearsal run at 225 sales; the resumed run reached an identical end state.
-
-**Passwords:**
-
-- New accounts get random passwords. They are printed once and, with `DEMO_CREDENTIALS_FILE=<path>`, written to a `0600` file outside the repository.
-- Re-runs never rotate them. `pnpm db:seed:demo --rotate-demo-passwords` explicitly issues new passwords for the demo staff accounts only.
-- Passwords are never stored in source or docs.
 
 `pnpm db:audit` is read-only. It prints counts, integrity checks (separately for demo and existing data) and business figures for the configured database.
 
@@ -344,11 +309,9 @@ The API Compose file always runs with `NODE_ENV=production`, which requires `COO
 | `pnpm db:migrate:diff`              | Read-only: print SQL from the live DB to `schema.prisma`       |
 | `pnpm db:migrate:status`            | Read-only: show applied/pending migrations                     |
 | `pnpm db:migrate:deploy`            | Apply committed migrations (**writes to the shared database**) |
-| `pnpm db:seed:admin`                | Explicitly seed/rotate the HQ admin (**writes**)               |
 | `pnpm verify:sales-concurrency`     | Concurrency scenarios on a **local disposable** database only  |
 | `pnpm verify:reports`               | Report fixtures and checks on a **local disposable** database  |
 | `pnpm verify:api`                   | Full HTTP business flow on a **local disposable** database     |
-| `pnpm db:seed:demo`                 | Idempotent demo data in the configured database (**writes**)   |
 | `pnpm db:audit`                     | Read-only counts and integrity checks                          |
 
 There is no external CI. Coolify builds from Git. Husky runs lint-staged on commit and enforces the commit message style (an imperative, sentence-case subject such as "Add inventory API", max 120 chars). Run `pnpm verify && pnpm security:audit` before pushing.
@@ -573,7 +536,7 @@ All endpoints are under `/api/v1/staff`. Every endpoint requires a bearer token 
 #### Account and membership lifecycle
 
 - **Create:**
-  - The password is hashed with Argon2id (`common/security/password.ts`, shared with login and the admin seed) **before** the transaction opens.
+  - The password is hashed with Argon2id (`common/security/password.ts`, shared with login) **before** the transaction opens.
   - The transaction locks the requested outlets `FOR SHARE` in id order and checks that they exist and are active.
   - It then inserts the user (`role = OUTLET_STAFF`, `isActive = true`, both set by the server) and all memberships.
   - Any failure rolls the whole thing back. A staff member may start with zero outlets.
@@ -1359,10 +1322,8 @@ src/
 └── server.ts               # process and server lifecycle
 prisma/
 ├── migrations/             # immutable SQL migration history
-├── schema.prisma           # full domain schema
-├── seed.ts                 # explicitly invoked HQ administrator seed
-└── seed-demo.ts            # idempotent, namespaced demo data
-scripts/                    # real-PostgreSQL verification, audit, demo login checks
+└── schema.prisma           # full domain schema
+scripts/                    # real-PostgreSQL verification and audit
 docs/                       # ARCHITECTURE.md, VERIFICATION.md
 tests/unit/                 # database-independent unit tests
 ```
