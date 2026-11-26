@@ -11,7 +11,7 @@ const valid = {
 describe('environment configuration', () => {
   it('parses and normalizes valid configuration', () => {
     const config = loadConfig(valid);
-    expect(config.PORT).toBe(3000);
+    expect(config.PORT).toBe(8000);
     expect(config.ALLOWED_ORIGINS).toEqual(['http://localhost:5173', 'https://app.example.com']);
   });
 

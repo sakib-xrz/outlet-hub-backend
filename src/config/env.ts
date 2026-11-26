@@ -10,7 +10,7 @@ const optionalString = z
 const schema = z
   .object({
     NODE_ENV: z.enum(['development', 'production']).default('development'),
-    PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+    PORT: z.coerce.number().int().min(1).max(65535).default(8000),
     TRUST_PROXY: z.coerce.number().int().min(0).max(10).default(0),
     REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(15_000),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(10_000),

@@ -12,9 +12,9 @@ services:
         required: false
     environment:
       NODE_ENV: production
-      PORT: ${PORT:-3000}
+      PORT: ${PORT:-8000}
     ports:
-      - '127.0.0.1:${API_PORT:-3000}:${PORT:-3000}'
+      - '127.0.0.1:${API_PORT:-8000}:${PORT:-8000}'
     stop_grace_period: 15s
 
   migrate:
