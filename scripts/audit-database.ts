@@ -2,17 +2,26 @@ import '@/config/load-env.js';
 import { loadConfig } from '@/config/env.js';
 import { createPrismaClient } from '@/database/client.js';
 import { Prisma } from '@/generated/prisma/client.js';
+import {
+  DEMO_ITEM_SKUS,
+  DEMO_OUTLET_CODES,
+  DEMO_STAFF_EMAILS,
+} from '../prisma/demo-identifiers.js';
 import { ReportRepository } from '@/modules/reports/report.repository.js';
 
 const config = loadConfig();
 const db = createPrismaClient({ ...config, DATABASE_POOL_MAX: 3 });
 const reports = new ReportRepository(db);
 
+const demoCodes = [...DEMO_OUTLET_CODES];
+const demoSkus = [...DEMO_ITEM_SKUS];
+const demoEmails = [...DEMO_STAFF_EMAILS];
+
 type Scope = 'demo' | 'existing';
 const outletScope = (scope: Scope, alias: string): Prisma.Sql =>
   scope === 'demo'
-    ? Prisma.sql`${Prisma.raw(alias)}.code LIKE 'DEMO-%'`
-    : Prisma.sql`${Prisma.raw(alias)}.code NOT LIKE 'DEMO-%'`;
+    ? Prisma.sql`${Prisma.raw(alias)}.code IN (${Prisma.join(demoCodes)})`
+    : Prisma.sql`${Prisma.raw(alias)}.code NOT IN (${Prisma.join(demoCodes)})`;
 
 async function integrity(scope: Scope): Promise<Record<string, number>> {
   const o = outletScope(scope, 'o');
@@ -50,11 +59,13 @@ async function integrity(scope: Scope): Promise<Record<string, number>> {
 async function counts(scope: Scope): Promise<Record<string, number>> {
   const o = outletScope(scope, 'o');
   const demoItems =
-    scope === 'demo' ? Prisma.sql`sku LIKE 'DEMO-%'` : Prisma.sql`sku NOT LIKE 'DEMO-%'`;
+    scope === 'demo'
+      ? Prisma.sql`sku IN (${Prisma.join(demoSkus)})`
+      : Prisma.sql`sku NOT IN (${Prisma.join(demoSkus)})`;
   const demoUsers =
     scope === 'demo'
-      ? Prisma.sql`email IN ('staff.mirpur@example.com','staff.gulshan@example.com','staff.dhanmondi@example.com','staff.uttara@example.com','staff.multi@example.com','staff.manager@example.com')`
-      : Prisma.sql`email NOT IN ('staff.mirpur@example.com','staff.gulshan@example.com','staff.dhanmondi@example.com','staff.uttara@example.com','staff.multi@example.com','staff.manager@example.com')`;
+      ? Prisma.sql`email IN (${Prisma.join(demoEmails)})`
+      : Prisma.sql`email NOT IN (${Prisma.join(demoEmails)})`;
   const [row] = await db.$queryRaw<Record<string, number>[]>`
     WITH scoped AS (SELECT id, is_active FROM outlets o WHERE ${o})
     SELECT
@@ -84,17 +95,20 @@ try {
     result[scope] = { counts: await counts(scope), integrity: await integrity(scope) };
   }
   const demoOutlets = await db.outlet.findMany({
-    where: { code: { startsWith: 'DEMO-' } },
+    where: { code: { in: demoCodes } },
     orderBy: { code: 'asc' },
     select: { id: true, code: true, isActive: true },
   });
   const revenue = await reports.revenueByOutlet(null, {
     page: 1,
     limit: 100,
-    search: 'DEMO-',
+    search: '',
     sortBy: 'totalRevenue',
     sortOrder: 'desc',
   });
+  const demoRevenue = revenue.items.filter((row) =>
+    (demoCodes as readonly string[]).includes(row.outletCode),
+  );
   const top: Record<string, string[]> = {};
   for (const outlet of demoOutlets) {
     const report = await reports.topSellingItems(outlet.id, null);
@@ -102,13 +116,13 @@ try {
       (item) => `${item.rank}. ${item.name} — ${item.quantitySold} units, ৳${item.totalRevenue}`,
     );
   }
-  const [demoRevenue] = await db.$queryRaw<
+  const [demoRevenueRow] = await db.$queryRaw<
     { revenue: string; first: Date | null; last: Date | null }[]
   >`
     SELECT COALESCE(SUM(s.total_amount), 0)::text AS revenue, MIN(s.created_at) AS first, MAX(s.created_at) AS last
-    FROM sales s JOIN outlets o ON o.id = s.outlet_id WHERE o.code LIKE 'DEMO-%'`;
+    FROM sales s JOIN outlets o ON o.id = s.outlet_id WHERE o.code IN (${Prisma.join(demoCodes)})`;
   const staff = await db.user.findMany({
-    where: { email: { startsWith: 'staff.', endsWith: '@example.com' } },
+    where: { email: { in: demoEmails } },
     orderBy: { email: 'asc' },
     select: {
       email: true,
@@ -118,8 +132,8 @@ try {
     },
   });
   result.business = {
-    demoRevenue,
-    revenueByOutlet: revenue.items.map(
+    demoRevenue: demoRevenueRow,
+    revenueByOutlet: demoRevenue.map(
       (row) =>
         `${row.outletCode} (${row.isActive ? 'active' : 'inactive'}): ৳${row.totalRevenue} over ${row.totalSales} sales`,
     ),

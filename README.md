@@ -219,14 +219,14 @@ The seed is idempotent for the normalized email and intentionally resets that ac
 
 **What it creates:**
 
-- Five outlets: `DEMO-MIRPUR`, `DEMO-GULSHAN`, `DEMO-DHANMONDI`, `DEMO-UTTARA` (assigned items and stock, no sales) and `DEMO-BANANI` (historical sales, then deactivated).
+- Five outlets: `MIRPUR`, `GULSHAN`, `DHANMONDI`, `UTTARA` (assigned items and stock, no sales) and `BANANI` (historical sales, then deactivated).
 - 32 master items (2 retired), 115 assignments: inherited and override prices, one `0.00` override, 3 inactive assignments, and high, medium, low and zero stock.
 - Six `OUTLET_STAFF` accounts (`staff.*@example.com`).
 - 400 historical sales over the 30 days before the first seeding day. The plan was capped from 500 to 400 after 325 sales existed; those are kept, and the remaining 75 are spread evenly over the final days. The seed refuses to run if any demo sale lies outside the plan.
 
 **Safety and idempotency:**
 
-- Everything is namespaced (`DEMO-` codes and SKUs). The seed refuses to touch a same-named record that is not demo data.
+- Codes and SKUs are shared with the identifiers in `prisma/demo-identifiers.ts`. The seed refuses to touch a same-named record that is not demo data.
 - Sales use deterministic request ids. The plan is anchored to the demo Mirpur outlet's creation day, so re-runs reproduce the same plan.
 - Stock is replenished once, to the target balance plus the planned consumption, and never reset after sales exist.
 - Historical timestamps are applied only to sales created by the seed's own deterministic request ids.

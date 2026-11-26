@@ -25,7 +25,7 @@ Every real-database script refuses to run unless all of the following hold:
 - it is not the application database;
 - it contains only data the scripts created.
 
-Nothing destructive ran against the configured database. Only additive, `DEMO-`-namespaced records were written there.
+Nothing destructive ran against the configured database. Only additive, demo-seed records were written there.
 
 ## Summary
 
@@ -165,13 +165,13 @@ Playwright with Chromium 159 (headless shell) runs the real backend (`tsx src/se
 
 - **Total demo revenue:** **৳428,095.00**, from 401 sales between 27 Oct and 26 Nov 2026 (Dhaka time). Seeded sales fall between 08:00 and 22:00 local time.
 
-| Outlet         | Status                         | Revenue     | Sales                       |
-| -------------- | ------------------------------ | ----------- | --------------------------- |
-| DEMO-GULSHAN   | active                         | ৳161,060.00 | 119                         |
-| DEMO-MIRPUR    | active                         | ৳103,875.00 | 133 (incl. smoke sale)      |
-| DEMO-BANANI    | **inactive**, still reportable | ৳83,420.00  | 67                          |
-| DEMO-DHANMONDI | active                         | ৳79,740.00  | 82                          |
-| DEMO-UTTARA    | active                         | ৳0.00       | 0 (zero-sale outlet listed) |
+| Outlet    | Status                         | Revenue     | Sales                       |
+| --------- | ------------------------------ | ----------- | --------------------------- |
+| GULSHAN   | active                         | ৳161,060.00 | 119                         |
+| MIRPUR    | active                         | ৳103,875.00 | 133 (incl. smoke sale)      |
+| BANANI    | **inactive**, still reportable | ৳83,420.00  | 67                          |
+| DHANMONDI | active                         | ৳79,740.00  | 82                          |
+| UTTARA    | active                         | ৳0.00       | 0 (zero-sale outlet listed) |
 
 **Top five items by quantity (all time):**
 
@@ -206,7 +206,7 @@ Playwright with Chromium 159 (headless shell) runs the real backend (`tsx src/se
 **Smoke sale (PASSED):**
 
 - Made by `staff.mirpur@example.com` through `POST /outlets/:id/sales` with the identifiable request id `5c7c11bb-6bcb-47c6-aefd-6aed5c545282` (derived from `outlethub-demo:smoke-sale:staff.mirpur:1`).
-- Receipt **DEMO-MIRPUR-000133**, ৳980.00.
+- Receipt **MIRPUR-000133**, ৳980.00.
 - Database queries confirmed the stock deduction for both lines and the counter moving 132 → 133. The sale is included in the final counts.
 - Re-running the script recognizes the existing sale instead of creating another.
 
@@ -228,7 +228,7 @@ Playwright with Chromium 159 (headless shell) runs the real backend (`tsx src/se
 
 | Scope                     | Records                               | Findings                      |
 | ------------------------- | ------------------------------------- | ----------------------------- |
-| Demo data (`DEMO-*`)      | 5 outlets, 401 sales, 813 lines       | **0 issues** on all 18 checks |
+| Demo data                 | 5 outlets, 401 sales, 813 lines       | **0 issues** on all 18 checks |
 | Existing application data | 1 HQ admin, no other business records | **0 issues**                  |
 
 Every demo outlet's receipt counter equals its highest receipt number and its sale count (gap-free). Migration status was re-checked afterwards: up to date. No repair was needed or performed.

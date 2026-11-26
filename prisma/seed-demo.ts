@@ -17,6 +17,7 @@ import { SaleRepository } from '@/modules/sales/sale.repository.js';
 import { SaleService } from '@/modules/sales/sale.service.js';
 import { StaffRepository } from '@/modules/staff/staff.repository.js';
 import { StaffService } from '@/modules/staff/staff.service.js';
+import { DEMO_OUTLET_CODES, DEMO_STAFF_EMAILS } from './demo-identifiers.js';
 
 const ROTATE = process.argv.includes('--rotate-demo-passwords');
 const CREDENTIALS_FILE = process.env.DEMO_CREDENTIALS_FILE;
@@ -31,31 +32,31 @@ type OutletKey = 'MIRPUR' | 'GULSHAN' | 'DHANMONDI' | 'UTTARA' | 'BANANI';
 
 const OUTLETS: Record<OutletKey, { code: string; name: string; address: string; sales: number }> = {
   MIRPUR: {
-    code: 'DEMO-MIRPUR',
+    code: 'MIRPUR',
     name: 'Mirpur Outlet',
     address: 'House 14, Road 2, Section 10, Mirpur, Dhaka 1216',
     sales: 170,
   },
   GULSHAN: {
-    code: 'DEMO-GULSHAN',
+    code: 'GULSHAN',
     name: 'Gulshan Outlet',
     address: 'Plot 51, Gulshan Avenue, Gulshan 1, Dhaka 1212',
     sales: 150,
   },
   DHANMONDI: {
-    code: 'DEMO-DHANMONDI',
+    code: 'DHANMONDI',
     name: 'Dhanmondi Outlet',
     address: 'House 27, Road 8A, Dhanmondi, Dhaka 1209',
     sales: 110,
   },
   UTTARA: {
-    code: 'DEMO-UTTARA',
+    code: 'UTTARA',
     name: 'Uttara Outlet',
     address: 'House 9, Road 11, Sector 7, Uttara, Dhaka 1230',
     sales: 0,
   },
   BANANI: {
-    code: 'DEMO-BANANI',
+    code: 'BANANI',
     name: 'Banani Outlet',
     address: 'House 66, Road 11, Block E, Banani, Dhaka 1213',
     sales: 70,
@@ -86,7 +87,7 @@ type Item = {
 
 const ITEMS: Item[] = [
   {
-    sku: 'DEMO-BRG-CLASSIC',
+    sku: 'BRG-CLASSIC',
     name: 'Classic Beef Burger',
     description: 'Grilled beef patty, cheddar, lettuce, tomato and house sauce',
     price: '350.00',
@@ -94,7 +95,7 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-BRG-CHICKEN',
+    sku: 'BRG-CHICKEN',
     name: 'Crispy Chicken Burger',
     description: 'Buttermilk fried chicken thigh with coleslaw and mayo',
     price: '320.00',
@@ -102,21 +103,21 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-BRG-DOUBLE',
+    sku: 'BRG-DOUBLE',
     name: 'Double Smash Burger',
     description: 'Two smashed beef patties, American cheese and pickles',
     price: '520.00',
     kind: 'burger',
   },
   {
-    sku: 'DEMO-BRG-NAGA',
+    sku: 'BRG-NAGA',
     name: 'Naga Fire Burger',
     description: 'Beef patty with naga chilli sauce and jalapenos',
     price: '390.00',
     kind: 'burger',
   },
   {
-    sku: 'DEMO-SND-CLUB',
+    sku: 'SND-CLUB',
     name: 'Chicken Club Sandwich',
     description: 'Triple-decker with grilled chicken, egg and cheese',
     price: '290.00',
@@ -124,14 +125,14 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-SND-TUNA',
+    sku: 'SND-TUNA',
     name: 'Tuna Melt Sandwich',
     description: 'Tuna, mozzarella and onion on toasted sourdough',
     price: '310.00',
     kind: 'sandwich',
   },
   {
-    sku: 'DEMO-SND-SHAWARMA',
+    sku: 'SND-SHAWARMA',
     name: 'Chicken Shawarma Wrap',
     description: 'Spiced chicken, garlic sauce and pickles in pita',
     price: '220.00',
@@ -139,7 +140,7 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-PZA-MARGHERITA',
+    sku: 'PZA-MARGHERITA',
     name: 'Margherita Pizza (10")',
     description: 'Tomato sauce, mozzarella and basil',
     price: '650.00',
@@ -147,21 +148,21 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-PZA-BBQ',
+    sku: 'PZA-BBQ',
     name: 'BBQ Chicken Pizza (10")',
     description: 'Smoky BBQ chicken, onion and capsicum',
     price: '780.00',
     kind: 'pizza',
   },
   {
-    sku: 'DEMO-PZA-BEEF',
+    sku: 'PZA-BEEF',
     name: 'Beef Pepperoni Pizza (10")',
     description: 'Halal beef pepperoni and mozzarella',
     price: '850.00',
     kind: 'pizza',
   },
   {
-    sku: 'DEMO-PST-ALFREDO',
+    sku: 'PST-ALFREDO',
     name: 'Chicken Alfredo Pasta',
     description: 'Fettuccine in creamy parmesan sauce with chicken',
     price: '450.00',
@@ -169,14 +170,14 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-PST-ARRABBIATA',
+    sku: 'PST-ARRABBIATA',
     name: 'Penne Arrabbiata',
     description: 'Penne in spicy tomato and garlic sauce',
     price: '380.00',
     kind: 'pasta',
   },
   {
-    sku: 'DEMO-RCE-BIRYANI',
+    sku: 'RCE-BIRYANI',
     name: 'Kacchi Biryani Bowl',
     description: 'Basmati rice with tender mutton and aloo',
     price: '420.00',
@@ -184,7 +185,7 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-RCE-TERIYAKI',
+    sku: 'RCE-TERIYAKI',
     name: 'Chicken Teriyaki Rice Bowl',
     description: 'Glazed chicken over steamed rice and vegetables',
     price: '360.00',
@@ -192,14 +193,14 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-RCE-KHICHURI',
+    sku: 'RCE-KHICHURI',
     name: 'Beef Khichuri Bowl',
     description: 'Lentil rice with slow-cooked beef',
     price: '330.00',
     kind: 'rice',
   },
   {
-    sku: 'DEMO-FCK-2PC',
+    sku: 'FCK-2PC',
     name: 'Fried Chicken (2 pcs)',
     description: 'Crispy spiced fried chicken, two pieces',
     price: '280.00',
@@ -207,7 +208,7 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-FCK-WINGS',
+    sku: 'FCK-WINGS',
     name: 'Hot Wings (6 pcs)',
     description: 'Chicken wings tossed in hot sauce',
     price: '340.00',
@@ -215,14 +216,14 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-FCK-BUCKET',
+    sku: 'FCK-BUCKET',
     name: 'Family Chicken Bucket (8 pcs)',
     description: 'Eight pieces of fried chicken for sharing',
     price: '1050.00',
     kind: 'chicken',
   },
   {
-    sku: 'DEMO-SNK-FRIES',
+    sku: 'SNK-FRIES',
     name: 'French Fries',
     description: 'Salted crispy potato fries',
     price: '150.00',
@@ -230,7 +231,7 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-SNK-NUGGETS',
+    sku: 'SNK-NUGGETS',
     name: 'Chicken Nuggets (8 pcs)',
     description: 'Golden chicken nuggets with dip',
     price: '240.00',
@@ -238,28 +239,28 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-SNK-ONION',
+    sku: 'SNK-ONION',
     name: 'Onion Rings',
     description: 'Beer-batter style onion rings (alcohol-free)',
     price: '180.00',
     kind: 'snack',
   },
   {
-    sku: 'DEMO-SNK-SINGARA',
+    sku: 'SNK-SINGARA',
     name: 'Singara (2 pcs)',
     description: 'Potato and pea filled pastry',
     price: '40.00',
     kind: 'snack',
   },
   {
-    sku: 'DEMO-COF-ESPRESSO',
+    sku: 'COF-ESPRESSO',
     name: 'Espresso',
     description: 'Double shot espresso',
     price: '180.00',
     kind: 'coffee',
   },
   {
-    sku: 'DEMO-COF-CAPPUCCINO',
+    sku: 'COF-CAPPUCCINO',
     name: 'Cappuccino',
     description: 'Espresso with steamed milk foam',
     price: '260.00',
@@ -267,14 +268,14 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-COF-ICED-LATTE',
+    sku: 'COF-ICED-LATTE',
     name: 'Iced Caramel Latte',
     description: 'Chilled latte with caramel syrup',
     price: '320.00',
     kind: 'coffee',
   },
   {
-    sku: 'DEMO-TEA-MILK',
+    sku: 'TEA-MILK',
     name: 'Milk Tea',
     description: 'Traditional Bangladeshi doodh cha',
     price: '40.00',
@@ -282,14 +283,14 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-TEA-LEMON',
+    sku: 'TEA-LEMON',
     name: 'Lemon Mint Tea',
     description: 'Black tea with lemon and fresh mint',
     price: '60.00',
     kind: 'tea',
   },
   {
-    sku: 'DEMO-CLD-WATER',
+    sku: 'CLD-WATER',
     name: 'Mineral Water (500 ml)',
     description: 'Bottled drinking water',
     price: '30.00',
@@ -297,7 +298,7 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-CLD-LEMONADE',
+    sku: 'CLD-LEMONADE',
     name: 'Fresh Lemonade',
     description: 'Fresh lime, sugar and soda',
     price: '120.00',
@@ -305,7 +306,7 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-CLD-MANGO-LASSI',
+    sku: 'CLD-MANGO-LASSI',
     name: 'Mango Lassi',
     description: 'Seasonal mango yogurt drink',
     price: '170.00',
@@ -313,7 +314,7 @@ const ITEMS: Item[] = [
     retired: true,
   },
   {
-    sku: 'DEMO-CLD-SODA',
+    sku: 'CLD-SODA',
     name: 'Soft Drink (250 ml)',
     description: 'Chilled carbonated soft drink',
     price: '50.00',
@@ -321,7 +322,7 @@ const ITEMS: Item[] = [
     core: true,
   },
   {
-    sku: 'DEMO-RCE-NIHARI',
+    sku: 'RCE-NIHARI',
     name: 'Beef Nihari with Rice',
     description: 'Discontinued slow-cooked nihari plate',
     price: '480.00',
@@ -331,64 +332,45 @@ const ITEMS: Item[] = [
 ];
 
 const EXTRAS: Record<OutletKey, string[]> = {
-  MIRPUR: [
-    'DEMO-BRG-DOUBLE',
-    'DEMO-BRG-NAGA',
-    'DEMO-SNK-SINGARA',
-    'DEMO-TEA-LEMON',
-    'DEMO-RCE-KHICHURI',
-    'DEMO-CLD-MANGO-LASSI',
-  ],
+  MIRPUR: ['BRG-DOUBLE', 'BRG-NAGA', 'SNK-SINGARA', 'TEA-LEMON', 'RCE-KHICHURI', 'CLD-MANGO-LASSI'],
   GULSHAN: [
-    'DEMO-BRG-DOUBLE',
-    'DEMO-PZA-BBQ',
-    'DEMO-PZA-BEEF',
-    'DEMO-COF-ESPRESSO',
-    'DEMO-COF-ICED-LATTE',
-    'DEMO-SND-TUNA',
-    'DEMO-PST-ARRABBIATA',
-    'DEMO-RCE-NIHARI',
+    'BRG-DOUBLE',
+    'PZA-BBQ',
+    'PZA-BEEF',
+    'COF-ESPRESSO',
+    'COF-ICED-LATTE',
+    'SND-TUNA',
+    'PST-ARRABBIATA',
+    'RCE-NIHARI',
   ],
   DHANMONDI: [
-    'DEMO-PST-ARRABBIATA',
-    'DEMO-RCE-KHICHURI',
-    'DEMO-COF-ICED-LATTE',
-    'DEMO-SNK-ONION',
-    'DEMO-TEA-LEMON',
-    'DEMO-CLD-MANGO-LASSI',
+    'PST-ARRABBIATA',
+    'RCE-KHICHURI',
+    'COF-ICED-LATTE',
+    'SNK-ONION',
+    'TEA-LEMON',
+    'CLD-MANGO-LASSI',
   ],
-  UTTARA: [
-    'DEMO-BRG-NAGA',
-    'DEMO-FCK-BUCKET',
-    'DEMO-SNK-SINGARA',
-    'DEMO-PZA-BBQ',
-    'DEMO-RCE-NIHARI',
-  ],
-  BANANI: [
-    'DEMO-FCK-BUCKET',
-    'DEMO-PZA-BEEF',
-    'DEMO-COF-ESPRESSO',
-    'DEMO-SNK-ONION',
-    'DEMO-SND-TUNA',
-  ],
+  UTTARA: ['BRG-NAGA', 'FCK-BUCKET', 'SNK-SINGARA', 'PZA-BBQ', 'RCE-NIHARI'],
+  BANANI: ['FCK-BUCKET', 'PZA-BEEF', 'COF-ESPRESSO', 'SNK-ONION', 'SND-TUNA'],
 };
 
 const OVERRIDES: Partial<Record<OutletKey, Record<string, string>>> = {
-  MIRPUR: { 'DEMO-TEA-MILK': '35.00', 'DEMO-BRG-CLASSIC': '330.00' },
+  MIRPUR: { 'TEA-MILK': '35.00', 'BRG-CLASSIC': '330.00' },
   GULSHAN: {
-    'DEMO-COF-CAPPUCCINO': '290.00',
-    'DEMO-PZA-MARGHERITA': '720.00',
-    'DEMO-BRG-CLASSIC': '390.00',
-    'DEMO-CLD-WATER': '40.00',
+    'COF-CAPPUCCINO': '290.00',
+    'PZA-MARGHERITA': '720.00',
+    'BRG-CLASSIC': '390.00',
+    'CLD-WATER': '40.00',
   },
-  DHANMONDI: { 'DEMO-CLD-WATER': '0.00', 'DEMO-PST-ALFREDO': '430.00' },
-  BANANI: { 'DEMO-FCK-2PC': '300.00', 'DEMO-COF-CAPPUCCINO': '280.00' },
+  DHANMONDI: { 'CLD-WATER': '0.00', 'PST-ALFREDO': '430.00' },
+  BANANI: { 'FCK-2PC': '300.00', 'COF-CAPPUCCINO': '280.00' },
 };
 
 const INACTIVE_ASSIGNMENTS: Partial<Record<OutletKey, string[]>> = {
-  MIRPUR: ['DEMO-PST-ALFREDO'],
-  GULSHAN: ['DEMO-SND-SHAWARMA'],
-  UTTARA: ['DEMO-COF-CAPPUCCINO'],
+  MIRPUR: ['PST-ALFREDO'],
+  GULSHAN: ['SND-SHAWARMA'],
+  UTTARA: ['COF-CAPPUCCINO'],
 };
 
 const BOOSTS: Record<OutletKey, Partial<Record<Item['kind'], number>>> = {
@@ -400,12 +382,12 @@ const BOOSTS: Record<OutletKey, Partial<Record<Item['kind'], number>>> = {
 };
 
 const STAFF: { email: string; outlets: OutletKey[] }[] = [
-  { email: 'staff.mirpur@example.com', outlets: ['MIRPUR'] },
-  { email: 'staff.gulshan@example.com', outlets: ['GULSHAN'] },
-  { email: 'staff.dhanmondi@example.com', outlets: ['DHANMONDI'] },
-  { email: 'staff.uttara@example.com', outlets: ['UTTARA'] },
-  { email: 'staff.multi@example.com', outlets: ['MIRPUR', 'GULSHAN'] },
-  { email: 'staff.manager@example.com', outlets: ACTIVE_KEYS },
+  { email: DEMO_STAFF_EMAILS[0], outlets: ['MIRPUR'] },
+  { email: DEMO_STAFF_EMAILS[1], outlets: ['GULSHAN'] },
+  { email: DEMO_STAFF_EMAILS[2], outlets: ['DHANMONDI'] },
+  { email: DEMO_STAFF_EMAILS[3], outlets: ['UTTARA'] },
+  { email: DEMO_STAFF_EMAILS[4], outlets: ['MIRPUR', 'GULSHAN'] },
+  { email: DEMO_STAFF_EMAILS[5], outlets: ACTIVE_KEYS },
 ];
 const BANANI_CASHIER = 'staff.manager@example.com';
 
@@ -440,7 +422,7 @@ function pick<T>(random: () => number, entries: readonly { value: T; weight: num
 const ITEM_BY_SKU = new Map(ITEMS.map((item) => [item.sku, item]));
 const itemOf = (sku: string): Item => {
   const item = ITEM_BY_SKU.get(sku);
-  if (!item) throw new Error(`Unknown demo SKU ${sku}`);
+  if (!item) throw new Error(`Unknown seed SKU ${sku}`);
   return item;
 };
 const menuOf = (outlet: OutletKey): string[] => [
@@ -641,7 +623,7 @@ async function main(): Promise<void> {
   const smokeRequestId = `${smokeHex.slice(0, 8)}-${smokeHex.slice(8, 12)}-4${smokeHex.slice(13, 16)}-a${smokeHex.slice(17, 20)}-${smokeHex.slice(20, 32)}`;
   const strays = await db.sale.count({
     where: {
-      outlet: { code: { startsWith: 'DEMO-' } },
+      outlet: { code: { in: [...DEMO_OUTLET_CODES] } },
       requestId: { notIn: [...planned, smokeRequestId] },
     },
   });
@@ -716,7 +698,8 @@ async function main(): Promise<void> {
       include: { memberships: { include: { outlet: { select: { code: true } } } } },
     });
     if (existing) {
-      const foreign = existing.memberships.some((row) => !row.outlet.code.startsWith('DEMO-'));
+      const demoCodes: readonly string[] = DEMO_OUTLET_CODES;
+      const foreign = existing.memberships.some((row) => !demoCodes.includes(row.outlet.code));
       if (existing.role !== Role.OUTLET_STAFF || foreign) {
         throw new Error(
           `${member.email} belongs to a non-demo account; choose another demo address.`,
