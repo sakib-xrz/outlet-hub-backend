@@ -104,7 +104,7 @@ All configuration is validated by Zod before startup. Invalid or unsafe combinat
 | Variable                                             | Purpose                                                           |
 | ---------------------------------------------------- | ----------------------------------------------------------------- |
 | `NODE_ENV`                                           | `development` or `production`                                     |
-| `PORT`                                               | Listener port (default `3000`); the server always binds `0.0.0.0` |
+| `PORT`                                               | Listener port (default `8000`); the server always binds `0.0.0.0` |
 | `TRUST_PROXY`                                        | Number of trusted reverse proxies (`1` behind Coolify's proxy)    |
 | `REQUEST_TIMEOUT_MS`, `SHUTDOWN_TIMEOUT_MS`          | Request and bounded drain timeouts                                |
 | `BODY_LIMIT`                                         | JSON/form request size, such as `100kb`                           |
@@ -139,7 +139,7 @@ pnpm db:migrate:status               # read-only check against the shared databa
 pnpm dev
 ```
 
-The API listens on `http://localhost:3000`. Swagger UI is at `/docs` when `SWAGGER_ENABLED=true` outside production. The OpenAPI document is at `/openapi.json`.
+The API listens on `http://localhost:8000`. Swagger UI is at `/docs` when `SWAGGER_ENABLED=true` outside production. The OpenAPI document is at `/openapi.json`.
 
 #### Connecting securely to the Coolify PostgreSQL
 
@@ -253,7 +253,7 @@ Env files are excluded by `.dockerignore`, so no credentials are copied into any
 ```bash
 cp .env.example .env.production      # NODE_ENV=production, COOKIE_SECURE=true, real secrets
 docker compose config --quiet        # validate
-docker compose up -d --build         # API on 127.0.0.1:${API_PORT:-3000}
+docker compose up -d --build         # API on 127.0.0.1:${API_PORT:-8000}
 docker compose ps
 docker compose down
 ```
@@ -266,8 +266,8 @@ Both applications have their own Compose file. The database is **intentionally e
 
 | Repository                                                              | Compose service                             | Published on                  |
 | ----------------------------------------------------------------------- | ------------------------------------------- | ----------------------------- |
-| [outlet-hub-backend](https://github.com/sakib-xrz/outlet-hub-backend)   | `api` (plus the optional `migrate` profile) | `127.0.0.1:${API_PORT:-3000}` |
-| [outlet-hub-frontend](https://github.com/sakib-xrz/outlet-hub-frontend) | `web` (nginx serving the built SPA)         | `127.0.0.1:${WEB_PORT:-8080}` |
+| [outlet-hub-backend](https://github.com/sakib-xrz/outlet-hub-backend)   | `api` (plus the optional `migrate` profile) | `127.0.0.1:${API_PORT:-8000}` |
+| [outlet-hub-frontend](https://github.com/sakib-xrz/outlet-hub-frontend) | `web` (nginx serving the built SPA)         | `127.0.0.1:${WEB_PORT:-5173}` |
 
 **1. API.** In this repository, create `.env.production`. Use placeholders here; put real secrets only in that ignored file.
 
@@ -275,34 +275,34 @@ Both applications have their own Compose file. The database is **intentionally e
 NODE_ENV=production
 DATABASE_URL=postgresql://<user>:<password>@<host>:5432/<database>?sslmode=require
 JWT_SECRET=<at least 32 random characters>
-ALLOWED_ORIGINS=http://localhost:8080      # must equal the web origin exactly
+ALLOWED_ORIGINS=http://localhost:5173      # must equal the web origin exactly
 COOKIE_SECURE=true                         # required in production; browsers accept it on http://localhost
 COOKIE_SAME_SITE=strict
 TRUST_PROXY=0                              # 1 behind Coolify/Traefik
 ```
 
 ```bash
-docker compose up -d --build               # API on http://localhost:3000
+docker compose up -d --build               # API on http://localhost:8000
 ```
 
 **2. Frontend.** In the frontend repository:
 
 ```bash
-VITE_API_BASE_URL=http://localhost:3000/api/v1 docker compose up -d --build   # SPA on http://localhost:8080
+VITE_API_BASE_URL=http://localhost:8000/api/v1 docker compose up -d --build   # SPA on http://localhost:5173
 ```
 
 **3. The three values must agree:**
 
 - `VITE_API_BASE_URL` (frontend, build time) must point at the API, including `/api/v1`. Its origin is also written into the SPA's CSP `connect-src`.
-- `ALLOWED_ORIGINS` (API, runtime) must contain the SPA's exact origin, for example `http://localhost:8080`. Otherwise CORS and the cookie endpoints refuse the browser.
-- `localhost:8080` and `localhost:3000` are the same site, so the `SameSite=Strict` refresh cookie works locally. In production, put the two on subdomains of one registrable domain, use HTTPS and set `COOKIE_SECURE=true`.
+- `ALLOWED_ORIGINS` (API, runtime) must contain the SPA's exact origin, for example `http://localhost:5173`. Otherwise CORS and the cookie endpoints refuse the browser.
+- `localhost:5173` and `localhost:8000` are the same site, so the `SameSite=Strict` refresh cookie works locally. In production, put the two on subdomains of one registrable domain, use HTTPS and set `COOKIE_SECURE=true`.
 
 The API Compose file always runs with `NODE_ENV=production`, which requires `COOKIE_SECURE=true`. That still works over plain HTTP on `localhost`, because browsers treat `http://localhost` as a secure context. On any other host, put both apps behind HTTPS.
 
 ### Coolify deployment
 
 1. **Database:** create the PostgreSQL resource in Coolify. Copy its **internal** connection URL for the API, since the API runs on the same server. Use the public URL only for local access (see above).
-2. **Application:** add a resource from the Git repository. Use build pack **Dockerfile**, base directory `/` (this repository's root), and Dockerfile `Dockerfile` (the final stage, `production`, is the default target). Set the port to `3000`, or whatever `PORT` you set.
+2. **Application:** add a resource from the Git repository. Use build pack **Dockerfile**, base directory `/` (this repository's root), and Dockerfile `Dockerfile` (the final stage, `production`, is the default target). Set the port to `8000`, or whatever `PORT` you set.
 3. **Domain/HTTPS:** assign the domain (for example `https://api.example.com`). Coolify's Traefik proxy gets the certificate and terminates TLS. It forwards `X-Forwarded-Proto` and `X-Forwarded-For`.
 4. **Environment variables** (runtime, not build-time). Mark secrets as secret:
 
